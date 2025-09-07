@@ -1,10 +1,11 @@
 # app.py — SmartPlay AI (Streamlit)
-# Full app with: custom ticket input (paste/CSV), top-up, de-dupe, PDFs, hot/cold, backtest.
+# Now includes: Next Draw Calendar + exact game names
+# Features: custom ticket input (paste/CSV), top-up, de-dupe, PDFs, hot/cold, backtest.
 
 import random
 from io import BytesIO
 from typing import List, Tuple, Optional, Dict
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -23,7 +24,48 @@ from reportlab.lib import colors
 # -----------------------------------------------------------
 st.set_page_config(page_title="SmartPlay AI", page_icon="🎯", layout="wide")
 
-REPORT_VERSION = "v1.3"
+REPORT_VERSION = "v1.4"  # bumped
+
+
+# -----------------------------------------------------------
+# Game names & schedules
+# -----------------------------------------------------------
+DISPLAY_NAMES = {
+    "lotto": "Jamaica Lotto",
+    "super": "Caribbean Super Lotto",
+    "powerball": "United States of America Powerball",
+}
+
+# Default weekly schedules (Python weekday: Mon=0 ... Sun=6)
+# You can override any of these in Streamlit Secrets as comma-separated integers, e.g. "2,5"
+DEFAULT_SCHEDULES = {
+    "lotto": [2, 5],       # Wed(2), Sat(5)
+    "super": [1, 4],       # Tue(1), Fri(4)
+    "powerball": [0, 2, 5] # Mon(0), Wed(2), Sat(5)
+}
+
+def get_schedule_from_secrets(game_key: str) -> List[int]:
+    key = f"{game_key.upper()}_DRAW_WEEKDAYS"
+    v = st.secrets.get(key, "")
+    if not v:
+        return DEFAULT_SCHEDULES[game_key]
+    try:
+        days = [int(x.strip()) for x in str(v).split(",") if str(x).strip() != ""]
+        days = [d for d in days if 0 <= d <= 6]
+        return days or DEFAULT_SCHEDULES[game_key]
+    except Exception:
+        return DEFAULT_SCHEDULES[game_key]
+
+
+def next_draw_dates(weekdays: List[int], start: date, k: int = 6) -> List[date]:
+    """Return next k draw dates (>= start) given weekday indices."""
+    out = []
+    d = start
+    while len(out) < k:
+        if d.weekday() in weekdays:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
 
 
 # -----------------------------------------------------------
@@ -392,17 +434,18 @@ def make_full_report(
 
     story.append(Paragraph(
         "<strong>SmartPlay AI</strong> highlights hot and cold number trends and produces balanced ticket sets. "
-        "This report summarizes current guidance for <em>Jamaica Lotto</em>, <em>Super Lotto</em>, and <em>Powerball</em>.",
+        f"This report summarizes current guidance for <em>{DISPLAY_NAMES['lotto']}</em>, "
+        f"<em>{DISPLAY_NAMES['super']}</em>, and <em>{DISPLAY_NAMES['powerball']}</em>.",
         normal
     ))
     story.append(Spacer(1, 12))
 
-    nice_game = {"lotto": "Jamaica Lotto (6/38 + Bonus)", "super": "Super Lotto (5/35 + SB 1–10)", "powerball": "Powerball (5/69 + PB 1–26)"}[game]
+    nice_game = DISPLAY_NAMES[game]
     main_hot = hotcold.get("hot_main", [])
     main_cold = hotcold.get("cold_main", [])
     rec_strategy = {"lotto": "Blend (≥2 hot, ≥2 cold)", "super": "Cold emphasis + SB spread", "powerball": "Blend whites, random PB"}[game]
 
-    w1, w2, w3, w4 = 150, 230, 230, CONTENT_W - (150 + 230 + 230)
+    w1, w2, w3, w4 = 200, 230, 230, CONTENT_W - (200 + 230 + 230)
     summary_rows = [
         ["Game", "Suggested Hot Numbers", "Suggested Cold/Overdue", "Recommended Strategy"],
         [nice_game, comma(main_hot), comma(main_cold), rec_strategy],
@@ -465,7 +508,7 @@ def make_full_report(
         ["Seed", str(seed)],
         ["Report version", REPORT_VERSION],
     ]
-    run_tbl = Table(run_rows, colWidths=[180, CONTENT_W - 180])
+    run_tbl = Table(run_rows, colWidths=[220, CONTENT_W - 220])
     run_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
@@ -495,8 +538,8 @@ def make_full_report(
     section.append(Spacer(1, 10))
     section.append(Paragraph("Changelog / Versioning", subheader))
     section.append(Paragraph(
-        f"<strong>{REPORT_VERSION}</strong> — Added auto hot/cold window note, constraints section, "
-        "run details, and backtest page.",
+        f"<strong>{REPORT_VERSION}</strong> — Added Next Draw Calendar and unified display names; "
+        "kept auto hot/cold, constraints, and backtest page.",
         normal
     ))
 
@@ -507,13 +550,13 @@ def make_full_report(
     story.append(Paragraph(f"Generated Ticket Pack — {nice_game}", subheader))
     if game == "lotto":
         rows = [["Ticket", "Numbers"]] + [[f"Lotto {i+1}", comma(nums)] for i, nums in enumerate(tickets)]
-        col_widths = [180, CONTENT_W - 180]
+        col_widths = [220, CONTENT_W - 220]
     elif game == "super":
         rows = [["Ticket", "Numbers (main)", "SB"]] + [[f"Super {i+1}", comma(m), str(sb)] for i, (m, sb) in enumerate(tickets)]
-        col_widths = [180, CONTENT_W - 180 - 80, 80]
+        col_widths = [220, CONTENT_W - 220 - 100, 100]
     else:  # powerball
         rows = [["Ticket", "Numbers (whites)", "PB"]] + [[f"Powerball {i+1}", comma(w), str(pb)] for i, (w, pb) in enumerate(tickets)]
-        col_widths = [180, CONTENT_W - 180 - 80, 80]
+        col_widths = [220, CONTENT_W - 220 - 100, 100]
 
     t2 = Table(rows, colWidths=col_widths)
     t2.setStyle(TableStyle([
@@ -539,7 +582,7 @@ def make_full_report(
         bt["date"] = bt["date"].astype(str)
         bt = bt.rename(columns={"best_tier": "Tier", "best_matches": "Hits"})[["date", "Hits", "Tier"]]
         bt_rows = [bt.columns.tolist()] + bt.values.tolist()
-        bt_tbl = Table(bt_rows, colWidths=[200, 100, CONTENT_W - 300])
+        bt_tbl = Table(bt_rows, colWidths=[260, 120, CONTENT_W - 380])
         bt_tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
             ("TEXTCOLOR", (0,0), (-1,0), colors.white),
@@ -591,9 +634,9 @@ def validate_main(nums: List[int], main_min: int, main_max: int, main_count: int
 def parse_custom_input(game: str, text: str) -> Tuple[List, List[str]]:
     """
     Supported formats (one ticket per line):
-      - Lotto:      04 08 12 21 30 33
-      - Super:      03 14 18 24 28 | 5      (SB after |)
-      - Powerball:  04 08 12 21 30 | 10     (PB after |)
+      - Jamaica Lotto:      04 08 12 21 30 33
+      - Caribbean Super Lotto: 03 14 18 24 28 | 5
+      - USA Powerball:      04 08 12 21 30 | 10
     """
     cfg = pool_bounds(game)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -666,7 +709,13 @@ def template_csv_bytes(game: str) -> bytes:
 # -----------------------------------------------------------
 st.sidebar.header("Generator")
 
-game = st.sidebar.selectbox("Game", ["lotto", "super", "powerball"])
+# Use display names in the dropdown, map back to internal keys
+display_options = [DISPLAY_NAMES[k] for k in ["lotto", "super", "powerball"]]
+chosen_display = st.sidebar.selectbox("Game", display_options, index=0)
+# reverse map:
+reverse_map = {v: k for k, v in DISPLAY_NAMES.items()}
+game = reverse_map[chosen_display]
+
 strategy = st.sidebar.selectbox("Strategy", ["blend", "cold", "none"])
 num_tix = st.sidebar.number_input("Tickets", min_value=1, max_value=50, value=7)
 
@@ -691,9 +740,9 @@ uploaded_csv = None
 if use_custom:
     st.sidebar.caption("Formats:")
     st.sidebar.code(
-        "Lotto:      04 08 12 21 30 33\n"
-        "Super:      03 14 18 24 28 | 5\n"
-        "Powerball:  04 08 12 21 30 | 10",
+        "Jamaica Lotto:           04 08 12 21 30 33\n"
+        "Caribbean Super Lotto:    03 14 18 24 28 | 5\n"
+        "USA Powerball:            04 08 12 21 30 | 10",
         language="text",
     )
     custom_text = st.sidebar.text_area("Paste tickets", height=140, placeholder="One ticket per line…\n04 08 12 21 30 33")
@@ -719,16 +768,36 @@ generate = st.sidebar.button("Generate")
 
 
 # -----------------------------------------------------------
-# Main
+# Main — Header + Next Draw Calendar
 # -----------------------------------------------------------
 st.title("SmartPlay AI 🎯")
-st.caption("Jamaica Lotto • Super Lotto • Powerball")
+st.caption(f"{DISPLAY_NAMES['lotto']} • {DISPLAY_NAMES['super']} • {DISPLAY_NAMES['powerball']}")
 st.markdown(
     f'New here? 👉 **[Download Sample Report]({SAMPLE_REPORT_URL})** · **[Subscribe for Premium Packs]({STRIPE_LINK})**'
 )
 st.markdown("---")
+
+# Next Draw Calendar (next 6 dates for each game)
+st.subheader("📅 Next Draw Calendar")
+today = date.today()
+rows = []
+for key in ["lotto", "super", "powerball"]:
+    sched = get_schedule_from_secrets(key)
+    ndates = next_draw_dates(sched, today, k=6)
+    rows.append({
+        "Game": DISPLAY_NAMES[key],
+        "Upcoming draws": ", ".join(d.strftime("%Y-%m-%d") for d in ndates)
+    })
+cal_df = pd.DataFrame(rows, columns=["Game", "Upcoming draws"])
+st.dataframe(cal_df, use_container_width=True)
+st.caption("Schedules are typical defaults. You can override weekdays via Secrets (e.g., LOTTO_DRAW_WEEKDAYS='2,5').")
+st.markdown("---")
+
 st.caption("Analytics only • No guaranteed outcomes • 18+ • Play responsibly.")
 
+# -----------------------------------------------------------
+# Generate flow
+# -----------------------------------------------------------
 if generate:
     # Use current seed for this run
     seed = int(st.session_state.seed)
