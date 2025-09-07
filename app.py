@@ -25,7 +25,6 @@ st.set_page_config(page_title="SmartPlay AI", page_icon="🎯", layout="centered
 STRIPE_LINK = st.secrets.get("STRIPE_LINK", "https://buy.stripe.com/your-real-checkout-link")
 SAMPLE_REPORT_URL = st.secrets.get(
     "SAMPLE_REPORT_URL",
-    # fallback to your landscape sample in GitHub if secrets missing
     "https://raw.githubusercontent.com/Smartplayai/smartplayai-app/main/smartplayai-sample-report_landscape.pdf",
 )
 PASSCODE = st.secrets.get("PASSCODE", "premium2025")
@@ -42,64 +41,61 @@ PB_TODAY = {"whites": (11, 22, 33, 44, 55), "pb": 4}
 # -----------------------------------------------------------
 DEFAULT_HOT = (8, 12, 13, 21, 27, 30, 33, 38)
 DEFAULT_COLD = (1, 2, 4, 5, 6, 9, 10, 16, 19, 37)
-CLUSTER = (2, 4, 5, 37)  # overdue cluster we sometimes nudge toward
+CLUSTER = (2, 4, 5, 37)  # overdue cluster
 
 
 # -----------------------------------------------------------
-# Utility: ticket generation for each game
+# Ticket generators
 # -----------------------------------------------------------
 def gen_lotto(n: int) -> List[List[int]]:
-    """Jamaica Lotto 6/38 (no bonus in ticket)."""
-    tickets = []
-    for _ in range(n):
-        nums = sorted(random.sample(range(1, 39), 6))
-        tickets.append(nums)
-    return tickets
+    """Jamaica Lotto 6/38."""
+    return [sorted(random.sample(range(1, 39), 6)) for _ in range(n)]
 
 
 def gen_super(n: int) -> List[Tuple[List[int], int]]:
-    """Super Lotto 5/35 + Super Ball 1–10."""
-    tickets = []
+    """Super Lotto 5/35 + SB 1–10."""
+    out = []
     for _ in range(n):
         mains = sorted(random.sample(range(1, 36), 5))
         sb = random.randint(1, 10)
-        tickets.append((mains, sb))
-    return tickets
+        out.append((mains, sb))
+    return out
 
 
 def gen_powerball(n: int) -> List[Tuple[List[int], int]]:
     """Powerball 5/69 + PB 1–26."""
-    tickets = []
+    out = []
     for _ in range(n):
         whites = sorted(random.sample(range(1, 70), 5))
         pb = random.randint(1, 26)
-        tickets.append((whites, pb))
-    return tickets
+        out.append((whites, pb))
+    return out
 
 
 # -----------------------------------------------------------
-# Strategy nudges (very light-touch demo logic)
+# Simple strategy nudges (demo)
 # -----------------------------------------------------------
 def nudge_blend(nums: List[int], hot=DEFAULT_HOT, cold=DEFAULT_COLD) -> List[int]:
     """Ensure at least ~2 hot and ~2 cold when possible (Lotto)."""
     pool_hot = [n for n in nums if n in hot]
     pool_cold = [n for n in nums if n in cold]
+
     if len(pool_hot) < 2:
-        # inject some hot numbers if available
         needed = 2 - len(pool_hot)
         choices = [h for h in hot if h not in nums]
-        nums = sorted((set(nums) - set(pool_cold)).union(set(random.sample(choices, min(needed, len(choices))))) | set(pool_cold))
-        nums = sorted(list(nums))[:6]
+        add = random.sample(choices, min(needed, len(choices))) if choices else []
+        nums = sorted(list(set(nums) | set(add)))[:6]
+
     if len(pool_cold) < 2:
         needed = 2 - len(pool_cold)
         choices = [c for c in cold if c not in nums]
-        nums = sorted((set(nums) - set(pool_hot)).union(set(random.sample(choices, min(needed, len(choices))))) | set(pool_hot))
-        nums = sorted(list(nums))[:6]
+        add = random.sample(choices, min(needed, len(choices))) if choices else []
+        nums = sorted(list(set(nums) | set(add)))[:6]
+
     return sorted(nums)
 
 
 def apply_strategy(game: str, tickets, strategy: str):
-    """Apply very simple strategy hints to tickets."""
     if strategy == "blend":
         if game == "lotto":
             out = []
@@ -107,16 +103,12 @@ def apply_strategy(game: str, tickets, strategy: str):
                 nudged = nudge_blend(row)
                 # small chance to include overdue cluster
                 if random.random() < 0.25:
-                    picks = set(nudged)
-                    need = 6 - len(picks.intersection(CLUSTER))
-                    picks = sorted(list((picks | set(CLUSTER)) if need > 0 else picks))[:6]
-                    nudged = sorted(picks)
+                    picks = set(nudged) | set(CLUSTER)
+                    nudged = sorted(list(picks))[:6]
                 out.append(nudged)
             return out
-        # for super/powerball just leave as generated (demo)
         return tickets
     elif strategy == "cold":
-        # tilt slightly toward cold by replacing 1-2 spots (Lotto only, demo)
         if game == "lotto":
             out = []
             for row in tickets:
@@ -134,10 +126,9 @@ def apply_strategy(game: str, tickets, strategy: str):
 
 
 # -----------------------------------------------------------
-# PDF generator (themed, portrait/landscape)
+# Themed PDF (portrait/landscape)
 # -----------------------------------------------------------
 def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip", orientation="landscape") -> bytes:
-    """Create a print-ready ticket slip PDF with SmartPlay AI theme."""
     page_size = landscape(A4) if orientation.lower() == "landscape" else A4
     PAGE_W, PAGE_H = page_size
     MARGIN = 36
@@ -147,8 +138,10 @@ def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip",
     doc = SimpleDocTemplate(
         buf,
         pagesize=page_size,
-        leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=MARGIN, bottomMargin=MARGIN,
+        leftMargin=MARGIN,
+        rightMargin=MARGIN,
+        topMargin=MARGIN,
+        bottomMargin=MARGIN,
     )
 
     styles = getSampleStyleSheet()
@@ -175,7 +168,7 @@ def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip",
     story.append(Paragraph(title, header_style))
     story.append(Spacer(1, 6))
 
-    # Build rows
+    # table rows
     rows = []
     if game == "powerball":
         rows.append(["Ticket", "Numbers (whites)", "PB"])
@@ -187,7 +180,7 @@ def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip",
         for i, t in enumerate(tickets, 1):
             rows.append([f"Super {i}", ", ".join(map(str, t[0])), str(t[1])])
         col_widths = [90, CONTENT_W - 90 - 70, 70]
-    else:
+    else:  # lotto
         rows.append(["Ticket", "Numbers"])
         for i, nums in enumerate(tickets, 1):
             rows.append([f"Lotto {i}", ", ".join(map(str, nums))])
@@ -246,13 +239,12 @@ st.markdown("---")
 st.caption("Analytics only • No guaranteed outcomes • 18+ • Play responsibly.")
 
 # -----------------------------------------------------------
-# Generate button
+# Generate
 # -----------------------------------------------------------
 if st.button("Generate", type="primary"):
-    # Fix seed for reproducibility
     random.seed(int(seed))
 
-    # 1) Generate base tickets
+    # 1) base tickets
     if game == "lotto":
         tickets = gen_lotto(n_tickets)
     elif game == "super":
@@ -260,12 +252,11 @@ if st.button("Generate", type="primary"):
     else:
         tickets = gen_powerball(n_tickets)
 
-    # 2) Apply simple strategy nudges
+    # 2) strategy nudges
     tickets = apply_strategy(game, tickets, strategy)
 
-    # 3) Premium bonus pack
+    # 3) premium bonus
     if is_premium:
-        # add 3 extra tickets with same seed stream
         extra = 3
         if game == "lotto":
             tickets += gen_lotto(extra)
@@ -275,30 +266,47 @@ if st.button("Generate", type="primary"):
             tickets += gen_powerball(extra)
         st.success("Premium unlocked: added 3 bonus tickets.")
 
-    # 4) Show table and downloads
+    # 4) table + downloads
     if game == "lotto":
         df = pd.DataFrame(tickets, columns=[f"N{i}" for i in range(1, 7)])
     elif game == "super":
+        # ✅ fixed: no starred expression in dict
         df = pd.DataFrame(
-            [{"N1": *t[0][:1], "N2": t[0][1], "N3": t[0][2], "N4": t[0][3], "N5": t[0][4], "SB": t[1]} for t in tickets]
-        )
-        # The above unpack trick is a bit messy; clearer approach:
-        df = pd.DataFrame(
-            [{"N1": t[0][0], "N2": t[0][1], "N3": t[0][2], "N4": t[0][3], "N5": t[0][4], "SB": t[1]} for t in tickets]
+            [
+                {
+                    "N1": t[0][0],
+                    "N2": t[0][1],
+                    "N3": t[0][2],
+                    "N4": t[0][3],
+                    "N5": t[0][4],
+                    "SB": t[1],
+                }
+                for t in tickets
+            ]
         )
     else:
         df = pd.DataFrame(
-            [{"W1": t[0][0], "W2": t[0][1], "W3": t[0][2], "W4": t[0][3], "W5": t[0][4], "PB": t[1]} for t in tickets]
+            [
+                {
+                    "W1": t[0][0],
+                    "W2": t[0][1],
+                    "W3": t[0][2],
+                    "W4": t[0][3],
+                    "W5": t[0][4],
+                    "PB": t[1],
+                }
+                for t in tickets
+            ]
         )
 
     st.dataframe(df, use_container_width=True)
 
-    # CSV download
+    # CSV
     csv_buf = BytesIO()
     df.to_csv(csv_buf, index=False)
     st.download_button("Download CSV", csv_buf.getvalue(), "tickets.csv", "text/csv")
 
-    # Themed PDF download (landscape by default)
+    # PDF
     orientation = "landscape" if pdf_layout == "Landscape" else "portrait"
     pdf_bytes = make_print_slip_pdf(game, tickets, orientation=orientation)
     st.download_button("Download Print Slip (PDF)", pdf_bytes, "slip.pdf", "application/pdf")
