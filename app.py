@@ -1,4 +1,5 @@
-# app.py — SmartPlay AI (Streamlit) — Auto Hot/Cold + Backtest + Themed PDFs
+# app.py — SmartPlay AI (Streamlit)
+# Full app with: custom ticket input (paste/CSV), top-up, de-dupe, PDFs, hot/cold, backtest.
 
 import random
 from io import BytesIO
@@ -62,7 +63,6 @@ def try_load_csv(url: str) -> Optional[pd.DataFrame]:
         return None
     try:
         df = pd.read_csv(url)
-        # standardize date column if present
         for c in df.columns:
             if "date" in c:
                 df[c] = pd.to_datetime(df[c], errors="coerce")
@@ -125,15 +125,12 @@ def compute_hot_cold(
     if draws is None or draws.empty:
         return {"hot_main": list(DEFAULT_HOT), "cold_main": list(DEFAULT_COLD)}
 
-    # Restrict to last N draws (most recent last)
     df = draws.copy().tail(lookback).reset_index(drop=True)
     n_main, n_special = pool_size_for_game(game)
 
-    # Build frequency vectors
     main_freq = pd.Series(0.0, index=range(1, n_main + 1))
     special_freq = pd.Series(0.0, index=range(1, (n_special or 0) + 1)) if n_special else None
 
-    # Most recent row gets highest weight
     for idx, row in df.iterrows():
         age = len(df) - 1 - idx
         w = alpha ** age
@@ -144,7 +141,6 @@ def compute_hot_cold(
         if n_special and sp and sp in special_freq.index:
             special_freq.loc[sp] += w
 
-    # Rank hot/cold
     hot_main = main_freq.sort_values(ascending=False).head(topk_hot).index.tolist()
     cold_main = main_freq.sort_values(ascending=True).head(topk_cold).index.tolist()
 
@@ -215,13 +211,12 @@ def apply_strategy(game: str, tickets, strategy: str, hotcold: Dict[str, List[in
 
 
 # -----------------------------------------------------------
-# Backtest: best tier hit per draw, last N draws
+# Backtest
 # -----------------------------------------------------------
 def match_count(a: List[int], b: List[int]) -> int:
     return len(set(a).intersection(set(b)))
 
 def tier_for_lotto(matches: int) -> str:
-    # Example tiers (adjust to official when you wire payouts):
     return {6: "Jackpot", 5: "Match 5", 4: "Match 4", 3: "Match 3"}.get(matches, "—")
 
 def tier_for_super(matches: int, sb_hit: bool) -> str:
@@ -282,7 +277,7 @@ def backtest(game: str, draws: Optional[pd.DataFrame], tickets, last_n: int = 30
 
 
 # -----------------------------------------------------------
-# Themed PDFs
+# PDFs
 # -----------------------------------------------------------
 def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip", orientation="landscape") -> bytes:
     page_size = landscape(A4) if orientation.lower() == "landscape" else A4
@@ -555,7 +550,6 @@ def make_full_report(
         ]))
         story.append(bt_tbl)
 
-        # summary line
         s_hits = int(bt["Hits"].sum())
         top_tier = bt["Tier"].value_counts().idxmax() if not bt["Tier"].empty else "—"
         story.append(Spacer(1, 8))
@@ -571,15 +565,112 @@ def make_full_report(
 
 
 # -----------------------------------------------------------
-# Sidebar UI (with random seed)
+# Custom ticket parsing & validation
+# -----------------------------------------------------------
+def pool_bounds(game: str) -> dict:
+    if game == "lotto":      # 6 from 1..38
+        return {"main_min": 1, "main_max": 38, "main_count": 6, "special": None}
+    if game == "super":      # 5 from 1..35 + SB 1..10
+        return {"main_min": 1, "main_max": 35, "main_count": 5, "special": (1, 10)}
+    if game == "powerball":  # 5 from 1..69 + PB 1..26
+        return {"main_min": 1, "main_max": 69, "main_count": 5, "special": (1, 26)}
+    return {"main_min": 1, "main_max": 0, "main_count": 0, "special": None}
+
+
+def validate_main(nums: List[int], main_min: int, main_max: int, main_count: int) -> Tuple[bool, str]:
+    if len(nums) != main_count:
+        return False, f"Need exactly {main_count} main numbers; got {len(nums)}."
+    if len(set(nums)) != len(nums):
+        return False, "Duplicate numbers in a ticket."
+    bad = [n for n in nums if n < main_min or n > main_max]
+    if bad:
+        return False, f"Numbers out of range {main_min}-{main_max}: {bad}"
+    return True, ""
+
+
+def parse_custom_input(game: str, text: str) -> Tuple[List, List[str]]:
+    """
+    Supported formats (one ticket per line):
+      - Lotto:      04 08 12 21 30 33
+      - Super:      03 14 18 24 28 | 5      (SB after |)
+      - Powerball:  04 08 12 21 30 | 10     (PB after |)
+    """
+    cfg = pool_bounds(game)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    tickets, errors = [], []
+
+    for i, ln in enumerate(lines, 1):
+        parts = [p.strip() for p in ln.replace(",", " ").split("|")]
+        left = parts[0]
+        try:
+            main = [int(x) for x in left.split() if x.strip().isdigit()]
+        except Exception:
+            errors.append(f"Line {i}: Could not parse numbers.")
+            continue
+
+        ok, msg = validate_main(main, cfg["main_min"], cfg["main_max"], cfg["main_count"])
+        if not ok:
+            errors.append(f"Line {i}: {msg}")
+            continue
+
+        if cfg["special"] is None:
+            tickets.append(sorted(main))
+        else:
+            if len(parts) != 2:
+                errors.append(f"Line {i}: Missing special ball after '|' (e.g., '| 5').")
+                continue
+            try:
+                sp = int(parts[1].split()[0])
+            except Exception:
+                errors.append(f"Line {i}: Could not read special ball.")
+                continue
+            lo, hi = cfg["special"]
+            if not (lo <= sp <= hi):
+                errors.append(f"Line {i}: Special ball out of range {lo}-{hi}.")
+                continue
+            tickets.append((sorted(main), sp))
+
+    return tickets, errors
+
+
+# Ticket normalization & de-dupe
+def norm_ticket(game: str, t):
+    if game == "lotto":
+        return tuple(sorted(t))
+    return (tuple(sorted(t[0])), int(t[1]))
+
+def dedupe_tickets(game: str, tickets):
+    seen, out = set(), []
+    for t in tickets:
+        key = norm_ticket(game, t)
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
+
+
+# CSV template bytes
+def template_csv_bytes(game: str) -> bytes:
+    if game == "lotto":
+        content = "N1,N2,N3,N4,N5,N6\n4,8,12,21,30,33\n2,7,14,19,25,37\n6,9,10,16,27,38\n"
+        return content.encode("utf-8")
+    if game == "super":
+        content = "N1,N2,N3,N4,N5,SB\n3,14,18,24,28,5\n2,8,13,21,30,9\n5,9,19,27,33,1\n"
+        return content.encode("utf-8")
+    content = "W1,W2,W3,W4,W5,PB\n4,8,12,21,30,10\n11,22,33,44,55,4\n7,16,24,39,48,12\n"
+    return content.encode("utf-8")
+
+
+# -----------------------------------------------------------
+# Sidebar UI (with random seed + custom input)
 # -----------------------------------------------------------
 st.sidebar.header("Generator")
 
 game = st.sidebar.selectbox("Game", ["lotto", "super", "powerball"])
 strategy = st.sidebar.selectbox("Strategy", ["blend", "cold", "none"])
-num_tix = st.sidebar.number_input("Tickets", min_value=1, max_value=20, value=7)
+num_tix = st.sidebar.number_input("Tickets", min_value=1, max_value=50, value=7)
 
-# Seed handling: keep in session; roll a new one by default after each Generate
+# Seed handling
 if "seed" not in st.session_state:
     st.session_state.seed = random.randint(1, 99999999)
 
@@ -591,6 +682,38 @@ if st.sidebar.button("🎲 Reroll seed now"):
 
 premium_input = st.sidebar.text_input("Premium Access (optional)", type="password")
 pdf_layout = st.sidebar.radio("Print slip layout", ["Landscape", "Portrait"], index=0)
+
+# Custom input controls
+use_custom = st.sidebar.checkbox("Enter my own tickets", value=False, help="Paste your tickets (one per line) or upload CSV.")
+custom_text = ""
+uploaded_csv = None
+
+if use_custom:
+    st.sidebar.caption("Formats:")
+    st.sidebar.code(
+        "Lotto:      04 08 12 21 30 33\n"
+        "Super:      03 14 18 24 28 | 5\n"
+        "Powerball:  04 08 12 21 30 | 10",
+        language="text",
+    )
+    custom_text = st.sidebar.text_area("Paste tickets", height=140, placeholder="One ticket per line…\n04 08 12 21 30 33")
+    uploaded_csv = st.sidebar.file_uploader("…or upload CSV", type=["csv"], help="Lotto: N1..N6;  Super: N1..N5,SB;  Powerball: W1..W5,PB")
+
+    # Template download
+    st.sidebar.download_button(
+        label="⬇️ Download CSV template",
+        data=template_csv_bytes(game),
+        file_name=("lotto_template.csv" if game == "lotto" else "super_template.csv" if game == "super" else "powerball_template.csv"),
+        mime="text/csv",
+        help="Download a sample CSV with the correct columns for this game."
+    )
+
+    # Combine & nudging options
+    top_up = st.sidebar.checkbox("Top up with generated tickets to reach N", value=True)
+    nudge_custom = st.sidebar.checkbox("Apply strategy nudges to custom tickets", value=False)
+else:
+    top_up = True
+    nudge_custom = False
 
 generate = st.sidebar.button("Generate")
 
@@ -611,20 +734,112 @@ if generate:
     seed = int(st.session_state.seed)
     random.seed(seed)
 
-    # Generate base tickets
-    if game == "lotto":
-        base = gen_lotto(num_tix)
-    elif game == "super":
-        base = gen_super(num_tix)
-    else:
-        base = gen_powerball(num_tix)
+    # ---------- 1) Parse custom input (text and/or CSV) ----------
+    custom_tix, custom_errors = [], []
 
-    # Hot/Cold from data (or defaults) + apply strategy
+    if use_custom and uploaded_csv is not None:
+        try:
+            df_in = pd.read_csv(uploaded_csv)
+            cfg = pool_bounds(game)
+            if game == "lotto":
+                needed = ["N1","N2","N3","N4","N5","N6"]
+                if all(c in df_in.columns for c in needed):
+                    for _, r in df_in.iterrows():
+                        row = [int(r[c]) for c in needed]
+                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
+                        if ok: custom_tix.append(sorted(row))
+                        else:  custom_errors.append(f"CSV row invalid: {msg}")
+                else:
+                    custom_errors.append("CSV needs columns: N1..N6")
+            elif game == "super":
+                needed = ["N1","N2","N3","N4","N5","SB"]
+                if all(c in df_in.columns for c in needed):
+                    for _, r in df_in.iterrows():
+                        row = [int(r[c]) for c in ["N1","N2","N3","N4","N5"]]
+                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
+                        sb = int(r["SB"])
+                        if ok and cfg["special"][0] <= sb <= cfg["special"][1]:
+                            custom_tix.append((sorted(row), sb))
+                        else:
+                            custom_errors.append("CSV row invalid (main or SB out of range).")
+                else:
+                    custom_errors.append("CSV needs columns: N1..N5,SB")
+            else:  # powerball
+                needed = ["W1","W2","W3","W4","W5","PB"]
+                if all(c in df_in.columns for c in needed):
+                    for _, r in df_in.iterrows():
+                        row = [int(r[c]) for c in ["W1","W2","W3","W4","W5"]]
+                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
+                        pb = int(r["PB"])
+                        if ok and cfg["special"][0] <= pb <= cfg["special"][1]:
+                            custom_tix.append((sorted(row), pb))
+                        else:
+                            custom_errors.append("CSV row invalid (whites or PB out of range).")
+                else:
+                    custom_errors.append("CSV needs columns: W1..W5,PB")
+        except Exception as e:
+            custom_errors.append(f"CSV read error: {e}")
+
+    if use_custom and custom_text:
+        tix, errs = parse_custom_input(game, custom_text)
+        custom_tix.extend(tix)
+        custom_errors.extend(errs)
+
+    # De-dupe custom list
+    custom_tix = dedupe_tickets(game, custom_tix)
+
+    if custom_errors:
+        st.error("Custom input issues:\n- " + "\n- ".join(custom_errors))
+
+    # ---------- 2) Generate to fill up (if requested) ----------
+    generated = []
+    if top_up:
+        need = max(0, num_tix - len(custom_tix))
+        if need > 0:
+            if game == "lotto":
+                generated = gen_lotto(need)
+            elif game == "super":
+                generated = gen_super(need)
+            else:
+                generated = gen_powerball(need)
+
+    # If not topping up and user supplied 0, generate all
+    if not top_up and len(custom_tix) == 0:
+        if game == "lotto":
+            generated = gen_lotto(num_tix)
+        elif game == "super":
+            generated = gen_super(num_tix)
+        else:
+            generated = gen_powerball(num_tix)
+
+    # ---------- 3) Combine, optionally nudge custom, and de-dupe ----------
+    base = custom_tix + generated
+    if len(base) == 0:
+        st.warning("No valid tickets supplied and generation disabled. Nothing to run.")
+        st.stop()
+
+    # Hot/Cold from data (or defaults)
     LOOKBACK = 60
     ALPHA = 0.97
     draws = get_game_draws(game)
     hotcold = compute_hot_cold(game, draws, lookback=LOOKBACK, alpha=ALPHA)
-    tickets = apply_strategy(game, base, strategy, hotcold)
+
+    # Strategy: apply to generated; optionally to user’s custom as well (Lotto only)
+    if game == "lotto" and strategy in ("blend", "cold"):
+        base_custom = custom_tix[:]
+        base_gen = generated[:]
+
+        if use_custom and nudge_custom and base_custom:
+            base_custom = apply_strategy(game, base_custom, strategy, hotcold)
+        if base_gen:
+            base_gen = apply_strategy(game, base_gen, strategy, hotcold)
+
+        tickets = base_custom + base_gen
+    else:
+        tickets = base
+
+    # Final de-dupe and trim to N
+    tickets = dedupe_tickets(game, tickets)[:num_tix]
 
     # Show as a table
     if game == "lotto":
@@ -655,7 +870,7 @@ if generate:
     # Backtest (if data available)
     bt_df = backtest(game, draws, tickets, last_n=30)
 
-    # Constraints shown in report (adjust as you like)
+    # Constraints shown in report (adjust as needed)
     constraints = {
         "min_hot": 2,
         "min_cold": 2,
