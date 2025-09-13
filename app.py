@@ -1,6 +1,6 @@
 # app.py
-# SmartPlayAI – Streamlit app with USA-themed “wormhole infinity” header,
-# centered layout, dropdown game chooser, clean number picker UI, AI Suggest, and PDF report.
+# SmartPlayAI – centered layout, top header with app name + tagline,
+# clean joined-zeros infinity symbol, dropdown-driven UI, AI suggest & PDF.
 
 import streamlit as st
 from datetime import datetime
@@ -13,7 +13,7 @@ import random
 st.set_page_config(page_title="SmartPlayAI", page_icon="🎯", layout="centered")
 
 # -----------------------
-# CONFIG & BACKGROUND HELPERS (not directly shown to users)
+# CONFIG & BACKGROUND HELPERS
 # -----------------------
 GAMES = {
     "Jamaica Lotto":   {"main_range": 38, "main_picks": 6, "special": None},
@@ -22,7 +22,7 @@ GAMES = {
 }
 
 def weighted_sample(range_max: int, k: int):
-    """Demo sampler (placeholder for your production AI model)."""
+    """Demo sampler (swap with your production AI)."""
     mid = range_max / 2
     weights = [0.6 + abs((i + 1) - mid) / range_max for i in range(range_max)]
     total = sum(weights)
@@ -68,7 +68,7 @@ def pdf_report(game_key: str, main_picks, special_picks):
 # SESSION STATE
 # -----------------------
 if "game" not in st.session_state:
-    st.session_state.game = None  # start with nothing chosen
+    st.session_state.game = None
 if "main_selected" not in st.session_state:
     st.session_state.main_selected = set()
 if "special_selected" not in st.session_state:
@@ -81,35 +81,25 @@ if "last_game_choice" not in st.session_state:
     st.session_state.last_game_choice = None
 
 # -----------------------
-# THEME CSS (centered layout) + STARFIELD + BALL FIXES
+# THEME CSS (centered + starfield + fixed balls + hide mirror checkboxes)
 # -----------------------
 st.markdown(
     """
     <style>
       :root{
-        --flag-blue:#002868; --flag-blue-bright:#0a3ca6;
-        --flag-red:#bf0a30;  --flag-red-strong:#ff2a4f;
-        --flag-white:#ffffff;
+        --flag-blue:#002868; --flag-red:#bf0a30; --white:#ffffff;
         --ease:cubic-bezier(.2,.8,.2,1);
       }
-      /* Global background */
       .stApp, .main, .block-container {
         background: radial-gradient(1400px 900px at 20% -10%, #0b0e15 0%, #04060a 45%, #000 100%) !important;
         color: #fff !important;
       }
-      /* Center the content and control width */
       .block-container{
-        padding-top:16px;
-        max-width: 880px;
-        margin: 0 auto !important;
+        padding-top:16px; max-width: 880px; margin: 0 auto !important;
       }
-      /* Align child vertical blocks to the center for a tidy look */
       [data-testid="stVerticalBlock"]{ align-items:center; }
-
-      /* Hide Streamlit menubar/footer for app-like polish */
       #MainMenu, footer {visibility: hidden;}
 
-      /* Star field overlay */
       .spa-stars, .spa-stars:before, .spa-stars:after{
         content:""; position: fixed; inset: -10%; pointer-events:none; opacity:.28; z-index: 0;
         background:
@@ -123,58 +113,33 @@ st.markdown(
       .spa-stars:after{ animation-duration:17s; opacity:.18; }
       @keyframes spaTwinkle{ 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
 
-      /* Header title/tagline styling (shared) */
       .hero-title{ font-size:48px; font-weight:900; margin-bottom:0; color:white; letter-spacing:1px; }
       .hero-tag{ font-size:22px; font-weight:600; color:#f7f7f7; text-shadow:0 0 8px rgba(255,255,255,0.25); }
 
-      /* Number balls: fixed-size circular slots for consistency */
-      .ball-wrap{
-        display:flex; align-items:center; justify-content:center;
-        width:64px; height:64px;              /* fixed slot */
-        flex: 0 0 64px;                        /* don't shrink */
-      }
+      .ball-wrap{ display:flex; align-items:center; justify-content:center; width:64px; height:64px; flex:0 0 64px; }
       .ball{
-        box-sizing:border-box;
-        width:64px; height:64px;               /* fixed circle */
-        border-radius:50%;
-        border: 3.5px solid var(--flag-blue);
+        box-sizing:border-box; width:64px; height:64px; border-radius:50%;
+        border:3.5px solid var(--flag-blue);
         background: radial-gradient(120% 120% at 30% 25%, #ffffff 0%, #f2f2f2 55%, #e1e1e1 100%);
         box-shadow: 0 8px 18px rgba(0,0,0,.35), 0 0 0 8px rgba(0,40,104,.12), inset 0 10px 18px rgba(0,0,0,.08);
         display:grid; place-items:center; cursor:pointer; position: relative;
         transition: transform .18s var(--ease), box-shadow .18s var(--ease), border-color .18s var(--ease);
       }
-      .ball:hover{
-        transform: translateY(-2px) scale(1.04);
-        border-color: var(--flag-red);
-        box-shadow: 0 10px 24px rgba(0,0,0,.45), 0 0 0 12px rgba(191,10,48,.18);
-      }
+      .ball:hover{ transform: translateY(-2px) scale(1.04); border-color: var(--flag-red); }
       .ball:checked{
         border-color: var(--flag-blue);
         background: radial-gradient(120% 120% at 30% 25%, #ffffff 0%, #dfe9ff 55%, #c8daff 100%);
         box-shadow: 0 10px 26px rgba(0,0,0,.55), 0 0 0 12px rgba(0,40,104,.12), inset 0 10px 16px rgba(255,255,255,.35);
       }
-      .ball-label{
-        position:absolute; inset:0; display:grid; place-items:center;
-        font-weight:900; color: var(--flag-blue);
-      }
+      .ball-label{ position:absolute; inset:0; display:grid; place-items:center; font-weight:900; color: var(--flag-blue); }
       .ball:checked + .ball-label{ color:#0b1020; }
 
       /* Hide mirror checkboxes completely */
-      div[data-testid="stCheckbox"]{
-        height:0 !important; overflow:hidden !important; margin:0 !important; padding:0 !important; visibility:hidden !important;
-      }
+      div[data-testid="stCheckbox"]{ height:0!important; overflow:hidden!important; margin:0!important; padding:0!important; visibility:hidden!important; }
 
-      /* CTA buttons */
-      .stButton > button {
-        border-radius: 999px; padding: 12px 20px; font-weight: 900;
-        box-shadow: 0 14px 40px rgba(191,10,48,.25);
-      }
-      .btn-primary > button{
-        background: linear-gradient(180deg, var(--flag-red), #e11c3f); color: #fff; border:0;
-      }
-      .btn-secondary > button{
-        background: rgba(255,255,255,.08); color:#fff; border:1px solid rgba(255,255,255,.15);
-      }
+      .stButton > button { border-radius: 999px; padding: 12px 20px; font-weight: 900; }
+      .btn-primary > button{ background: linear-gradient(180deg, var(--flag-red), #e11c3f); color:#fff; border:0; }
+      .btn-secondary > button{ background: rgba(255,255,255,.08); color:#fff; border:1px solid rgba(255,255,255,.15); }
     </style>
     <div class="spa-stars"></div>
     """,
@@ -182,87 +147,63 @@ st.markdown(
 )
 
 # -----------------------
-# HEADER: App Name + Tagline + Two-zeros Infinity Symbol
+# HEADER: App Name + Tagline
 # -----------------------
-st.components.v1.html(
+st.markdown(
     """
-    <div style="text-align:center; margin-top:10px; position:relative; z-index:1;">
+    <div style="text-align:center; margin-top:6px; position:relative; z-index:1;">
       <h1 class="hero-title">SmartPlay<span style="color:#ff2a4f;">AI</span></h1>
       <div style="margin-top:6px;">
         <span class="hero-tag">Let AI Unlock Your Next Big Win.</span>
       </div>
     </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    <div style="display:flex;justify-content:center;margin-top:16px; position:relative; z-index:1;">
+# -----------------------
+# HEADER: Infinity (two joined zeros, thick, with center pinch)
+# -----------------------
+st.components.v1.html(
+    """
+    <div style="display:flex;justify-content:center;margin-top:12px; position:relative; z-index:1;">
       <svg viewBox="0 0 1100 360" style="width:min(1100px,96vw); height:360px; overflow:visible;">
         <defs>
-          <!-- Two perfect joined circles to form infinity -->
-          <path id="path∞"
-                d="M340,180 m-140,0 a140,140 0 1,0 280,0 a140,140 0 1,0 -280,0
-                   M760,180 m-140,0 a140,140 0 1,0 280,0 a140,140 0 1,0 -280,0" />
-          <linearGradient id="gradRB" x1="0%" y1="50%" x2="100%" y2="50%">
-            <stop offset="0%"  stop-color="#bf0a30"/>
-            <stop offset="48%" stop-color="#ff2a4f"/>
-            <stop offset="52%" stop-color="#0a3ca6"/>
-            <stop offset="100%" stop-color="#002868"/>
-          </linearGradient>
-          <linearGradient id="innerLight" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="rgba(255,255,255,.95)"/>
-            <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
-          </linearGradient>
-          <filter id="outerGlow" x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="12" result="b"/>
-            <feColorMatrix in="b" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0.85 0" result="m"/>
-            <feBlend in="SourceGraphic" in2="m" mode="screen"/>
-          </filter>
-          <filter id="innerGlow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="7" result="b"/>
-            <feComposite in="b" in2="SourceAlpha" operator="in" result="i"/>
-            <feBlend in="SourceGraphic" in2="i" mode="screen"/>
-          </filter>
+          <!-- centerline curve -->
+          <path id="centerline"
+                d="M180,180
+                   C300,40 460,40 550,180
+                   C640,320 800,320 920,180
+                   C800,40 640,40 550,180
+                   C460,320 300,320 180,180" />
+
+          <!-- mask that carves a slim waist at the crossing -->
+          <mask id="pinchMask">
+            <rect x="0" y="0" width="1100" height="360" fill="white"/>
+            <!-- two rotated ellipses remove material to create the pinch -->
+            <ellipse cx="550" cy="180" rx="38" ry="120" fill="black" transform="rotate(45 550 180)"/>
+            <ellipse cx="550" cy="180" rx="38" ry="120" fill="black" transform="rotate(-45 550 180)"/>
+          </mask>
         </defs>
 
-        <!-- Triple-thick glowing tube for a bold look -->
-        <use href="#path∞" stroke="url(#gradRB)" stroke-width="90" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#outerGlow)"/>
-        <use href="#path∞" stroke="url(#gradRB)" stroke-width="78" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
-        <use href="#path∞" stroke="url(#innerLight)" stroke-width="50" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#innerGlow)" opacity=".85"/>
-
-        <!-- Flowing numbers along the circles (animated) -->
-        <g font-weight="900" font-size="22" fill="#ffffff" filter="url(#innerGlow)">
-          <text>
-            <textPath href="#path∞" startOffset="0%">
-              1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •
-              <animate attributeName="startOffset" values="0%;30%;0%" dur="12s" repeatCount="indefinite"/>
-            </textPath>
-          </text>
-          <text opacity=".7">
-            <textPath href="#path∞" startOffset="50%">
-              0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 •
-              <animate attributeName="startOffset" values="50%;80%;50%" dur="14s" repeatCount="indefinite"/>
-            </textPath>
-          </text>
-        </g>
+        <!-- silhouette: change stroke to any color if desired -->
+        <use href="#centerline"
+             stroke="black" stroke-width="140"
+             stroke-linecap="round" stroke-linejoin="round" fill="none"
+             mask="url(#pinchMask)"/>
       </svg>
     </div>
     """,
-    height=480,
+    height=380,
 )
 
 # -----------------------
 # GAME SELECTION (dropdown + lazy reveal)
 # -----------------------
-st.markdown(
-    "<div style='text-align:center;margin-top:-8px;'><h3>Select Your Game</h3></div>",
-    unsafe_allow_html=True
-)
+st.markdown("<div style='text-align:center;margin-top:-4px;'><h3>Select Your Game</h3></div>", unsafe_allow_html=True)
 
 CHOOSER_LABEL = "— Select a game —"
-game_choice = st.selectbox(
-    "Choose your game",
-    [CHOOSER_LABEL] + list(GAMES.keys()),
-    index=0,
-    label_visibility="collapsed",
-)
+game_choice = st.selectbox("Choose your game", [CHOOSER_LABEL] + list(GAMES.keys()), index=0, label_visibility="collapsed")
 
 # Reset state when switching games or clearing selection
 if game_choice != st.session_state.last_game_choice:
@@ -278,12 +219,9 @@ if game_choice != CHOOSER_LABEL:
     cfg = GAMES[st.session_state.game]
 
     # -----------------------
-    # NUMBER GRID (only appears after game chosen)
+    # NUMBER GRID (only after game chosen)
     # -----------------------
-    st.markdown(
-        "<div style='text-align:center; margin: 6px 0 8px; font-weight: 800; font-size: 22px;'>Select Your Numbers</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div style='text-align:center; margin: 6px 0 8px; font-weight: 800; font-size: 22px;'>Select Your Numbers</div>", unsafe_allow_html=True)
 
     preview = min(28, cfg["main_range"])
     show_count = cfg["main_range"] if st.session_state.show_more_main else preview
@@ -294,12 +232,11 @@ if game_choice != CHOOSER_LABEL:
         cols = st.columns(cols_per_row, gap="small")
         for i, c in enumerate(cols):
             n = r * cols_per_row + i + 1
-            if n > show_count:
+            if n > show_count: 
                 continue
             key = f"main_{n}"
             checked = (n in st.session_state.main_selected)
             with c:
-                # Render a visually styled ball (HTML input) and a hidden Streamlit checkbox to mirror state
                 st.markdown(
                     f"""
                     <div class="ball-wrap">
@@ -309,34 +246,30 @@ if game_choice != CHOOSER_LABEL:
                     """,
                     unsafe_allow_html=True,
                 )
-                # Hidden mirror checkbox captures state changes for Streamlit
+                # mirror state
                 mirror = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
                 if mirror and n not in st.session_state.main_selected:
-                    # enforce max picks: remove earliest (lowest) if already full
                     if len(st.session_state.main_selected) >= cfg["main_picks"]:
                         first = sorted(st.session_state.main_selected)[0]
                         st.session_state.main_selected.remove(first)
                         mk = f"main_{first}_mirror"
-                        if mk in st.session_state:
-                            st.session_state[mk] = False
+                        if mk in st.session_state: st.session_state[mk] = False
                     st.session_state.main_selected.add(n)
                 if not mirror and n in st.session_state.main_selected:
                     st.session_state.main_selected.remove(n)
 
-    # Show more / less controls
+    # Show more / less
     cta_cols = st.columns([1,1,1])
     with cta_cols[1]:
         if cfg["main_range"] > preview:
             if not st.session_state.show_more_main:
-                if st.button(f"Show {cfg['main_range'] - preview} more", key="main_more", help="Reveal the full number range"):
-                    st.session_state.show_more_main = True
-                    st.rerun()
+                if st.button(f"Show {cfg['main_range'] - preview} more", key="main_more"):
+                    st.session_state.show_more_main = True; st.rerun()
             else:
                 if st.button("Show less", key="main_less"):
-                    st.session_state.show_more_main = False
-                    st.rerun()
+                    st.session_state.show_more_main = False; st.rerun()
 
-    # Special ball section (only for games that have it)
+    # Special ball section
     if cfg["special"]:
         st.markdown(
             f"<div style='text-align:center; margin: 12px 0 6px; font-weight: 800;'>"
@@ -350,7 +283,7 @@ if game_choice != CHOOSER_LABEL:
             cols = st.columns(cols_per_row, gap="small")
             for i, c in enumerate(cols):
                 n = r * cols_per_row + i + 1
-                if n > sp_show_count:
+                if n > sp_show_count: 
                     continue
                 key = f"special_{n}"
                 checked = (n in st.session_state.special_selected)
@@ -364,15 +297,13 @@ if game_choice != CHOOSER_LABEL:
                         """,
                         unsafe_allow_html=True,
                     )
-                    # Mirror to state (limit to exactly cfg['special']['picks'])
                     mirror = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
                     if mirror and n not in st.session_state.special_selected:
                         if len(st.session_state.special_selected) >= cfg["special"]["picks"]:
                             first = next(iter(st.session_state.special_selected))
                             st.session_state.special_selected.remove(first)
                             sk = f"special_{first}_mirror"
-                            if sk in st.session_state:
-                                st.session_state[sk] = False
+                            if sk in st.session_state: st.session_state[sk] = False
                         st.session_state.special_selected.add(n)
                     if not mirror and n in st.session_state.special_selected:
                         st.session_state.special_selected.remove(n)
@@ -381,27 +312,23 @@ if game_choice != CHOOSER_LABEL:
             if cfg["special"]["range"] > sp_preview:
                 if not st.session_state.show_more_special:
                     if st.button(f"Show {cfg['special']['range'] - sp_preview} more", key="sp_more"):
-                        st.session_state.show_more_special = True
-                        st.rerun()
+                        st.session_state.show_more_special = True; st.rerun()
                 else:
                     if st.button("Show less", key="sp_less"):
-                        st.session_state.show_more_special = False
-                        st.rerun()
+                        st.session_state.show_more_special = False; st.rerun()
 
     # -----------------------
-    # ACTIONS (appear only after game chosen)
+    # ACTIONS (only after game chosen)
     # -----------------------
     a1, a2, a3 = st.columns(3)
 
     with a1:
         if st.button("AI Suggest", key="ai_suggest", help="Let SmartPlayAI choose a set"):
             main, special = suggest_for_game(st.session_state.game)
-
             # reset mirrors and apply picks
             for n in range(1, cfg["main_range"] + 1):
                 mk = f"main_{n}_mirror"
-                if mk in st.session_state:
-                    st.session_state[mk] = False
+                if mk in st.session_state: st.session_state[mk] = False
             st.session_state.main_selected = set(main)
             for n in main:
                 st.session_state[f"main_{n}_mirror"] = True
@@ -409,8 +336,7 @@ if game_choice != CHOOSER_LABEL:
             if cfg["special"]:
                 for n in range(1, cfg["special"]["range"] + 1):
                     sk = f"special_{n}_mirror"
-                    if sk in st.session_state:
-                        st.session_state[sk] = False
+                    if sk in st.session_state: st.session_state[sk] = False
                 st.session_state.special_selected = set(special)
                 for n in special:
                     st.session_state[f"special_{n}_mirror"] = True
@@ -458,5 +384,4 @@ if game_choice != CHOOSER_LABEL:
         unsafe_allow_html=True,
     )
 else:
-    # Nothing chosen yet: only show the header + tip
     st.info("Select a game from the dropdown to reveal the number grid and actions.")
