@@ -81,7 +81,7 @@ if "last_game_choice" not in st.session_state:
     st.session_state.last_game_choice = None
 
 # -----------------------
-# THEME CSS (centered layout) + STARFIELD
+# THEME CSS (centered layout) + STARFIELD + BALL FIXES
 # -----------------------
 st.markdown(
     """
@@ -123,20 +123,20 @@ st.markdown(
       .spa-stars:after{ animation-duration:17s; opacity:.18; }
       @keyframes spaTwinkle{ 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
 
-      /* Banner pill */
-      .spa-banner {
-        display: inline-flex; align-items:center; justify-content:center;
-        padding: 14px 30px; border-radius: 999px;
-        background: linear-gradient(180deg, #083382, var(--flag-blue));
-        color: var(--flag-white); font-weight: 900; font-size: 38px; letter-spacing: .04em;
-        text-transform: uppercase; box-shadow: 0 10px 40px rgba(0,40,104,.45), 0 0 0 10px rgba(255,255,255,.06);
-      }
+      /* Header title/tagline styling (shared) */
+      .hero-title{ font-size:48px; font-weight:900; margin-bottom:0; color:white; letter-spacing:1px; }
+      .hero-tag{ font-size:22px; font-weight:600; color:#f7f7f7; text-shadow:0 0 8px rgba(255,255,255,0.25); }
 
-      /* Number balls */
-      .ball-wrap{ display:flex; align-items:center; justify-content:center; }
-      .ball {
-        appearance: none;
-        width: 58px; height: 58px; border-radius: 50%;
+      /* Number balls: fixed-size circular slots for consistency */
+      .ball-wrap{
+        display:flex; align-items:center; justify-content:center;
+        width:64px; height:64px;              /* fixed slot */
+        flex: 0 0 64px;                        /* don't shrink */
+      }
+      .ball{
+        box-sizing:border-box;
+        width:64px; height:64px;               /* fixed circle */
+        border-radius:50%;
         border: 3.5px solid var(--flag-blue);
         background: radial-gradient(120% 120% at 30% 25%, #ffffff 0%, #f2f2f2 55%, #e1e1e1 100%);
         box-shadow: 0 8px 18px rgba(0,0,0,.35), 0 0 0 8px rgba(0,40,104,.12), inset 0 10px 18px rgba(0,0,0,.08);
@@ -159,6 +159,11 @@ st.markdown(
       }
       .ball:checked + .ball-label{ color:#0b1020; }
 
+      /* Hide mirror checkboxes completely */
+      div[data-testid="stCheckbox"]{
+        height:0 !important; overflow:hidden !important; margin:0 !important; padding:0 !important; visibility:hidden !important;
+      }
+
       /* CTA buttons */
       .stButton > button {
         border-radius: 999px; padding: 12px 20px; font-weight: 900;
@@ -177,19 +182,24 @@ st.markdown(
 )
 
 # -----------------------
-# ANIMATED WORMHOLE INFINITY HEADER (SVG)
+# HEADER: App Name + Tagline + Two-zeros Infinity Symbol
 # -----------------------
 st.components.v1.html(
     """
-    <div style="display:flex;justify-content:center;margin:8px 0 4px; position:relative; z-index:1;">
-      <div class="spa-banner">LOTTERY</div>
+    <div style="text-align:center; margin-top:10px; position:relative; z-index:1;">
+      <h1 class="hero-title">SmartPlay<span style="color:#ff2a4f;">AI</span></h1>
+      <div style="margin-top:6px;">
+        <span class="hero-tag">Let AI Unlock Your Next Big Win.</span>
+      </div>
     </div>
-    <div style="display:flex;justify-content:center;margin-top:4px; position:relative; z-index:1;">
+
+    <div style="display:flex;justify-content:center;margin-top:16px; position:relative; z-index:1;">
       <svg viewBox="0 0 1100 360" style="width:min(1100px,96vw); height:360px; overflow:visible;">
         <defs>
-          <!-- rounder infinity -->
-          <path id="path∞" d="M140,180 C240,60 360,60 500,180 C640,300 760,300 960,180 C760,60 640,60 500,180 C360,300 240,300 140,180Z" />
-          <!-- tube gradients -->
+          <!-- Two perfect joined circles to form infinity -->
+          <path id="path∞"
+                d="M340,180 m-140,0 a140,140 0 1,0 280,0 a140,140 0 1,0 -280,0
+                   M760,180 m-140,0 a140,140 0 1,0 280,0 a140,140 0 1,0 -280,0" />
           <linearGradient id="gradRB" x1="0%" y1="50%" x2="100%" y2="50%">
             <stop offset="0%"  stop-color="#bf0a30"/>
             <stop offset="48%" stop-color="#ff2a4f"/>
@@ -210,55 +220,32 @@ st.components.v1.html(
             <feComposite in="b" in2="SourceAlpha" operator="in" result="i"/>
             <feBlend in="SourceGraphic" in2="i" mode="screen"/>
           </filter>
-          <!-- circular whirl paths for inner spin -->
-          <path id="whirlL" d="M350,180 m-120,0 a120,120 0 1,0 240,0 a120,120 0 1,0 -240,0" />
-          <path id="whirlR" d="M750,180 m-120,0 a120,120 0 1,0 240,0 a120,120 0 1,0 -240,0" />
         </defs>
 
-        <!-- triple-thick glassy tube -->
-        <use href="#path∞" stroke="url(#gradRB)" stroke-width="78" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#outerGlow)"/>
-        <use href="#path∞" stroke="url(#gradRB)" stroke-width="66" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
-        <use href="#path∞" stroke="url(#innerLight)" stroke-width="40" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#innerGlow)" opacity=".85"/>
+        <!-- Triple-thick glowing tube for a bold look -->
+        <use href="#path∞" stroke="url(#gradRB)" stroke-width="90" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#outerGlow)"/>
+        <use href="#path∞" stroke="url(#gradRB)" stroke-width="78" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
+        <use href="#path∞" stroke="url(#innerLight)" stroke-width="50" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#innerGlow)" opacity=".85"/>
 
-        <!-- flowing numbers along main infinity -->
+        <!-- Flowing numbers along the circles (animated) -->
         <g font-weight="900" font-size="22" fill="#ffffff" filter="url(#innerGlow)">
           <text>
             <textPath href="#path∞" startOffset="0%">
-              1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •
+              1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •
               <animate attributeName="startOffset" values="0%;30%;0%" dur="12s" repeatCount="indefinite"/>
             </textPath>
           </text>
           <text opacity=".7">
             <textPath href="#path∞" startOffset="50%">
-              0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 •
+              0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 •
               <animate attributeName="startOffset" values="50%;80%;50%" dur="14s" repeatCount="indefinite"/>
             </textPath>
-          </text>
-        </g>
-
-        <!-- inner whirlwinds (counter-rotating) -->
-        <g font-weight="900" font-size="18" fill="#ffffff">
-          <text>
-            <textPath href="#whirlL" startOffset="0%">1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •</textPath>
-            <animateTransform attributeName="transform" type="rotate" from="0 350 180" to="360 350 180" dur="6s" repeatCount="indefinite"/>
-          </text>
-          <text opacity=".75">
-            <textPath href="#whirlL" startOffset="50%">5 4 3 2 1 0 9 8 7 6 • 5 4 3 2 1 0 9 8 7 6 •</textPath>
-            <animateTransform attributeName="transform" type="rotate" from="0 350 180" to="-360 350 180" dur="9s" repeatCount="indefinite"/>
-          </text>
-          <text>
-            <textPath href="#whirlR" startOffset="0%">1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •</textPath>
-            <animateTransform attributeName="transform" type="rotate" from="0 750 180" to="-360 750 180" dur="6.5s" repeatCount="indefinite"/>
-          </text>
-          <text opacity=".75">
-            <textPath href="#whirlR" startOffset="50%">5 4 3 2 1 0 9 8 7 6 • 5 4 3 2 1 0 9 8 7 6 •</textPath>
-            <animateTransform attributeName="transform" type="rotate" from="0 750 180" to="360 750 180" dur="10s" repeatCount="indefinite"/>
           </text>
         </g>
       </svg>
     </div>
     """,
-    height=420,
+    height=480,
 )
 
 # -----------------------
@@ -307,7 +294,7 @@ if game_choice != CHOOSER_LABEL:
         cols = st.columns(cols_per_row, gap="small")
         for i, c in enumerate(cols):
             n = r * cols_per_row + i + 1
-            if n > show_count: 
+            if n > show_count:
                 continue
             key = f"main_{n}"
             checked = (n in st.session_state.main_selected)
@@ -330,7 +317,7 @@ if game_choice != CHOOSER_LABEL:
                         first = sorted(st.session_state.main_selected)[0]
                         st.session_state.main_selected.remove(first)
                         mk = f"main_{first}_mirror"
-                        if mk in st.session_state: 
+                        if mk in st.session_state:
                             st.session_state[mk] = False
                     st.session_state.main_selected.add(n)
                 if not mirror and n in st.session_state.main_selected:
@@ -363,7 +350,7 @@ if game_choice != CHOOSER_LABEL:
             cols = st.columns(cols_per_row, gap="small")
             for i, c in enumerate(cols):
                 n = r * cols_per_row + i + 1
-                if n > sp_show_count: 
+                if n > sp_show_count:
                     continue
                 key = f"special_{n}"
                 checked = (n in st.session_state.special_selected)
@@ -384,7 +371,7 @@ if game_choice != CHOOSER_LABEL:
                             first = next(iter(st.session_state.special_selected))
                             st.session_state.special_selected.remove(first)
                             sk = f"special_{first}_mirror"
-                            if sk in st.session_state: 
+                            if sk in st.session_state:
                                 st.session_state[sk] = False
                         st.session_state.special_selected.add(n)
                     if not mirror and n in st.session_state.special_selected:
@@ -413,7 +400,7 @@ if game_choice != CHOOSER_LABEL:
             # reset mirrors and apply picks
             for n in range(1, cfg["main_range"] + 1):
                 mk = f"main_{n}_mirror"
-                if mk in st.session_state: 
+                if mk in st.session_state:
                     st.session_state[mk] = False
             st.session_state.main_selected = set(main)
             for n in main:
