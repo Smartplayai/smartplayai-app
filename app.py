@@ -1,974 +1,428 @@
-# app.py — SmartPlay AI (Streamlit)
-# Now includes: Next Draw Calendar + exact game names
-# Features: custom ticket input (paste/CSV), top-up, de-dupe, PDFs, hot/cold, backtest.
-
-import random
-from io import BytesIO
-from typing import List, Tuple, Optional, Dict
-from datetime import datetime, date, timedelta
-
-import pandas as pd
+# app.py
 import streamlit as st
+from datetime import datetime
+from fpdf import FPDF
+import random
 
-# ReportLab (PDF)
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+st.set_page_config(page_title="SmartPlayAI", page_icon="🎯", layout="centered")
 
-
-# -----------------------------------------------------------
-# Page config
-# -----------------------------------------------------------
-st.set_page_config(page_title="SmartPlay AI", page_icon="🎯", layout="wide")
-
-REPORT_VERSION = "v1.4"  # bumped
-
-
-# -----------------------------------------------------------
-# Game names & schedules
-# -----------------------------------------------------------
-DISPLAY_NAMES = {
-    "lotto": "Jamaica Lotto",
-    "super": "Caribbean Super Lotto",
-    "powerball": "United States of America Powerball",
+# -----------------------
+# CONFIG & “BACKGROUND” HELPERS (not displayed to users)
+# -----------------------
+GAMES = {
+    "Jamaica Lotto":   {"main_range": 38, "main_picks": 6, "special": None},
+    "Caribbean Super": {"main_range": 35, "main_picks": 5, "special": {"range": 10, "picks": 1, "label": "Super Ball"}},
+    "US Powerball":    {"main_range": 69, "main_picks": 5, "special": {"range": 26, "picks": 1, "label": "Powerball"}},
 }
 
-# Default weekly schedules (Python weekday: Mon=0 ... Sun=6)
-# You can override any of these in Streamlit Secrets as comma-separated integers, e.g. "2,5"
-DEFAULT_SCHEDULES = {
-    "lotto": [2, 5],       # Wed(2), Sat(5)
-    "super": [1, 4],       # Tue(1), Fri(4)
-    "powerball": [0, 2, 5] # Mon(0), Wed(2), Sat(5)
-}
-
-def get_schedule_from_secrets(game_key: str) -> List[int]:
-    key = f"{game_key.upper()}_DRAW_WEEKDAYS"
-    v = st.secrets.get(key, "")
-    if not v:
-        return DEFAULT_SCHEDULES[game_key]
-    try:
-        days = [int(x.strip()) for x in str(v).split(",") if str(x).strip() != ""]
-        days = [d for d in days if 0 <= d <= 6]
-        return days or DEFAULT_SCHEDULES[game_key]
-    except Exception:
-        return DEFAULT_SCHEDULES[game_key]
-
-
-def next_draw_dates(weekdays: List[int], start: date, k: int = 6) -> List[date]:
-    """Return next k draw dates (>= start) given weekday indices."""
-    out = []
-    d = start
-    while len(out) < k:
-        if d.weekday() in weekdays:
-            out.append(d)
-        d += timedelta(days=1)
-    return out
-
-
-# -----------------------------------------------------------
-# Secrets / links (fallback defaults)
-# -----------------------------------------------------------
-STRIPE_LINK = st.secrets.get("STRIPE_LINK", "https://buy.stripe.com/test_123")
-SAMPLE_REPORT_URL = st.secrets.get(
-    "SAMPLE_REPORT_URL",
-    "https://raw.githubusercontent.com/Smartplayai/smartplayai-app/main/smartplayai-sample-report_landscape.pdf",
-)
-PASSCODE = st.secrets.get("PASSCODE", "premium2025")
-
-# Optional sources for historical draws (CSV on the web/GitHub raw)
-LOTTO_CSV_URL = st.secrets.get("LOTTO_CSV_URL", "")
-SUPER_CSV_URL = st.secrets.get("SUPER_CSV_URL", "")
-POWER_CSV_URL = st.secrets.get("POWER_CSV_URL", "")
-
-RESPONSIBLE_HELP = st.secrets.get(
-    "RESPONSIBLE_HELP",
-    "If gambling is affecting you, seek local support resources."
-)
-
-
-# -----------------------------------------------------------
-# Defaults (used if no data sources present)
-# -----------------------------------------------------------
-DEFAULT_HOT = (8, 12, 13, 21, 27, 30, 33, 38)
-DEFAULT_COLD = (1, 2, 4, 5, 6, 9, 10, 16, 19, 37)
-CLUSTER = (2, 4, 5, 37)  # overdue cluster nudge
-
-
-# -----------------------------------------------------------
-# Helpers: loading data & hot/cold classification
-# -----------------------------------------------------------
-def try_load_csv(url: str) -> Optional[pd.DataFrame]:
-    if not url:
-        return None
-    try:
-        df = pd.read_csv(url)
-        for c in df.columns:
-            if "date" in c:
-                df[c] = pd.to_datetime(df[c], errors="coerce")
-        return df
-    except Exception:
-        return None
-
-
-def get_game_draws(game: str) -> Optional[pd.DataFrame]:
-    if game == "lotto":
-        return try_load_csv(LOTTO_CSV_URL)
-    if game == "super":
-        return try_load_csv(SUPER_CSV_URL)
-    if game == "powerball":
-        return try_load_csv(POWER_CSV_URL)
-    return None
-
-
-def pool_size_for_game(game: str) -> Tuple[int, Optional[int]]:
-    # returns (main_pool_size, special_pool_size)
-    if game == "lotto":
-        return (38, None)
-    if game == "super":
-        return (35, 10)  # SB 1–10
-    if game == "powerball":
-        return (69, 26)  # PB 1–26
-    return (0, None)
-
-
-def extract_main_numbers(row: pd.Series, game: str) -> List[int]:
-    if game == "lotto":
-        cols = ["n1", "n2", "n3", "n4", "n5", "n6"]
-    elif game == "super":
-        cols = ["n1", "n2", "n3", "n4", "n5"]
-    else:  # powerball
-        cols = ["w1", "w2", "w3", "w4", "w5"]
-    return [int(row[c]) for c in cols if c in row and pd.notna(row[c])]
-
-
-def extract_special(row: pd.Series, game: str) -> Optional[int]:
-    if game == "super" and "sb" in row and pd.notna(row["sb"]):
-        return int(row["sb"])
-    if game == "powerball" and "pb" in row and pd.notna(row["pb"]):
-        return int(row["pb"])
-    return None
-
-
-def compute_hot_cold(
-    game: str,
-    draws: Optional[pd.DataFrame],
-    lookback: int = 60,
-    alpha: float = 0.97,
-    topk_hot: int = 7,
-    topk_cold: int = 10,
-) -> Dict[str, List[int]]:
-    """
-    EWMA-like recency weights: weight = alpha^(age), most recent draw has age=0.
-    Returns dict with 'hot_main', 'cold_main' and optionally 'hot_special','cold_special'.
-    """
-    if draws is None or draws.empty:
-        return {"hot_main": list(DEFAULT_HOT), "cold_main": list(DEFAULT_COLD)}
-
-    df = draws.copy().tail(lookback).reset_index(drop=True)
-    n_main, n_special = pool_size_for_game(game)
-
-    main_freq = pd.Series(0.0, index=range(1, n_main + 1))
-    special_freq = pd.Series(0.0, index=range(1, (n_special or 0) + 1)) if n_special else None
-
-    for idx, row in df.iterrows():
-        age = len(df) - 1 - idx
-        w = alpha ** age
-        for v in extract_main_numbers(row, game):
-            if v in main_freq.index:
-                main_freq.loc[v] += w
-        sp = extract_special(row, game)
-        if n_special and sp and sp in special_freq.index:
-            special_freq.loc[sp] += w
-
-    hot_main = main_freq.sort_values(ascending=False).head(topk_hot).index.tolist()
-    cold_main = main_freq.sort_values(ascending=True).head(topk_cold).index.tolist()
-
-    result = {"hot_main": hot_main, "cold_main": cold_main}
-    if n_special and special_freq is not None:
-        hot_special = special_freq.sort_values(ascending=False).head(3).index.tolist()
-        cold_special = special_freq.sort_values(ascending=True).head(3).index.tolist()
-        result.update({"hot_special": hot_special, "cold_special": cold_special})
-
-    return result
-
-
-# -----------------------------------------------------------
-# Ticket generators
-# -----------------------------------------------------------
-def gen_lotto(n: int) -> List[List[int]]:
-    return [sorted(random.sample(range(1, 39), 6)) for _ in range(n)]
-
-def gen_super(n: int) -> List[Tuple[List[int], int]]:
-    return [(sorted(random.sample(range(1, 36), 5)), random.randint(1, 10)) for _ in range(n)]
-
-def gen_powerball(n: int) -> List[Tuple[List[int], int]]:
-    return [(sorted(random.sample(range(1, 70), 5)), random.randint(1, 26)) for _ in range(n)]
-
-
-# -----------------------------------------------------------
-# Strategy nudges (demo)
-# -----------------------------------------------------------
-def nudge_blend(nums: List[int], hot: List[int], cold: List[int]) -> List[int]:
-    pool_hot = [n for n in nums if n in hot]
-    pool_cold = [n for n in nums if n in cold]
-
-    if len(pool_hot) < 2:
-        add = [h for h in hot if h not in nums]
-        add = random.sample(add, min(2 - len(pool_hot), len(add))) if add else []
-        nums = sorted(list(set(nums) | set(add)))[:6]
-
-    if len(pool_cold) < 2:
-        add = [c for c in cold if c not in nums]
-        add = random.sample(add, min(2 - len(pool_cold), len(add))) if add else []
-        nums = sorted(list(set(nums) | set(add)))[:6]
-
-    return sorted(nums)
-
-
-def apply_strategy(game: str, tickets, strategy: str, hotcold: Dict[str, List[int]]):
-    if strategy == "blend" and game == "lotto":
-        hot = hotcold.get("hot_main", list(DEFAULT_HOT))
-        cold = hotcold.get("cold_main", list(DEFAULT_COLD))
-        out = []
-        for row in tickets:
-            nudged = nudge_blend(row[:], hot, cold)
-            if random.random() < 0.25:
-                nudged = sorted(list(set(nudged) | set(CLUSTER)))[:6]
-            out.append(nudged)
-        return out
-    elif strategy == "cold" and game == "lotto":
-        cold = hotcold.get("cold_main", list(DEFAULT_COLD))
-        out = []
-        for row in tickets:
-            candidates = [c for c in cold if c not in row]
-            if candidates:
-                pos = random.randrange(0, 6)
-                row[pos] = random.choice(candidates)
-            out.append(sorted(row))
-        return out
-    return tickets
-
-
-# -----------------------------------------------------------
-# Backtest
-# -----------------------------------------------------------
-def match_count(a: List[int], b: List[int]) -> int:
-    return len(set(a).intersection(set(b)))
-
-def tier_for_lotto(matches: int) -> str:
-    return {6: "Jackpot", 5: "Match 5", 4: "Match 4", 3: "Match 3"}.get(matches, "—")
-
-def tier_for_super(matches: int, sb_hit: bool) -> str:
-    if matches == 5 and sb_hit: return "Jackpot"
-    if matches == 5: return "Match 5"
-    if matches == 4 and sb_hit: return "Match 4+SB"
-    if matches == 4: return "Match 4"
-    if matches == 3 and sb_hit: return "Match 3+SB"
-    if matches == 3: return "Match 3"
-    return "—"
-
-def tier_for_power(matches: int, pb_hit: bool) -> str:
-    if matches == 5 and pb_hit: return "Jackpot"
-    if matches == 5: return "Match 5"
-    if matches == 4 and pb_hit: return "Match 4+PB"
-    if matches == 4: return "Match 4"
-    if matches == 3 and pb_hit: return "Match 3+PB"
-    if matches == 3: return "Match 3"
-    if matches == 2 and pb_hit: return "2+PB"
-    if matches == 1 and pb_hit: return "1+PB"
-    if matches == 0 and pb_hit: return "PB only"
-    return "—"
-
-def backtest(game: str, draws: Optional[pd.DataFrame], tickets, last_n: int = 30) -> pd.DataFrame:
-    if draws is None or draws.empty:
-        return pd.DataFrame(columns=["date", "best_tier", "best_matches"])
-
-    df = draws.copy().tail(last_n)
-    rows = []
-    for _, row in df.iterrows():
-        main = extract_main_numbers(row, game)
-        special = extract_special(row, game)
-
-        best_matches = 0
-        best_tier = "—"
-        for t in tickets:
-            if game == "lotto":
-                m = match_count(t, main)
-                tier = tier_for_lotto(m)
-            elif game == "super":
-                m = match_count(t[0], main)
-                tier = tier_for_super(m, special is not None and t[1] == special)
-            else:
-                m = match_count(t[0], main)
-                tier = tier_for_power(m, special is not None and t[1] == special)
-
-            if m > best_matches:
-                best_matches, best_tier = m, tier
-
-        draw_date = None
-        for c in df.columns:
-            if "date" in c and pd.notna(row[c]):
-                draw_date = row[c]
+def weighted_sample(range_max: int, k: int):
+    """Slight bias to mid-high values (placeholder for your real model)."""
+    mid = range_max / 2
+    weights = [0.6 + abs((i+1) - mid)/range_max for i in range(range_max)]
+    total = sum(weights)
+    picks = set()
+    while len(picks) < k:
+        r = random.random() * total
+        acc = 0
+        choice = 1
+        for i, w in enumerate(weights):
+            acc += w
+            if acc >= r:
+                choice = i + 1
                 break
-        rows.append({"date": draw_date, "best_tier": best_tier, "best_matches": best_matches})
+        picks.add(choice)
+    return sorted(picks)
 
-    return pd.DataFrame(rows)
+def suggest_for_game(game_key: str):
+    cfg = GAMES[game_key]
+    main = weighted_sample(cfg["main_range"], cfg["main_picks"])
+    special = []
+    if cfg["special"]:
+        special = weighted_sample(cfg["special"]["range"], cfg["special"]["picks"])
+    return main, special
 
+def pdf_report(game_key: str, main_picks, special_picks):
+    cfg = GAMES[game_key]
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=18)
+    pdf.cell(0, 12, "SmartPlayAI Number Report", ln=True, align="C")
+    pdf.ln(4)
+    pdf.set_font("Helvetica", size=12)
+    pdf.multi_cell(0, 8, f"""
+Game: {game_key}
+Main Picks ({cfg['main_picks']} of {cfg['main_range']}): {', '.join(map(str, main_picks)) if main_picks else '—'}
+{(cfg['special']['label'] + ': ' + ', '.join(map(str, special_picks))) if cfg['special'] else ''}
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Notes: This is a demo report. Replace the suggestion logic with your production AI model.
+""".strip())
+    return pdf.output(dest="S").encode("latin1")
 
-# -----------------------------------------------------------
-# PDFs
-# -----------------------------------------------------------
-def make_print_slip_pdf(game: str, tickets, title="SmartPlay AI — Print Slip", orientation="landscape") -> bytes:
-    page_size = landscape(A4) if orientation.lower() == "landscape" else A4
-    PAGE_W, PAGE_H = page_size
-    MARGIN = 36
-    CONTENT_W = PAGE_W - 2 * MARGIN
+# -----------------------
+# SESSION STATE
+# -----------------------
+if "game" not in st.session_state:
+    st.session_state.game = "US Powerball"
+if "main_selected" not in st.session_state:
+    st.session_state.main_selected = set()
+if "special_selected" not in st.session_state:
+    st.session_state.special_selected = set()
+if "show_more_main" not in st.session_state:
+    st.session_state.show_more_main = False
+if "show_more_special" not in st.session_state:
+    st.session_state.show_more_special = False
 
-    buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=page_size,
-        leftMargin=MARGIN, rightMargin=MARGIN, topMargin=MARGIN, bottomMargin=MARGIN,
-    )
-
-    styles = getSampleStyleSheet()
-    header_style = ParagraphStyle(
-        "Header", parent=styles["Heading1"], fontName="Helvetica-Bold",
-        fontSize=26, textColor=colors.white, backColor=colors.HexColor("#0d0d0d"),
-        alignment=1, spaceAfter=14, leading=30
-    )
-    note_style = ParagraphStyle(
-        "Note", parent=styles["Normal"], fontSize=9.5,
-        textColor=colors.HexColor("#666666"), leading=13
-    )
-
-    story = [Paragraph(title, header_style), Spacer(1, 6)]
-
-    rows = []
-    if game == "powerball":
-        rows.append(["Ticket", "Numbers (whites)", "PB"])
-        for i, (whites, pb) in enumerate(tickets, 1):
-            rows.append([f"PB {i}", ", ".join(map(str, whites)), str(pb)])
-        col_widths = [90, CONTENT_W - 160, 70]
-    elif game == "super":
-        rows.append(["Ticket", "Numbers (main)", "SB"])
-        for i, (mains, sb) in enumerate(tickets, 1):
-            rows.append([f"Super {i}", ", ".join(map(str, mains)), str(sb)])
-        col_widths = [90, CONTENT_W - 160, 70]
-    else:  # lotto
-        rows.append(["Ticket", "Numbers"])
-        for i, nums in enumerate(tickets, 1):
-            rows.append([f"Lotto {i}", ", ".join(map(str, nums))])
-        col_widths = [90, CONTENT_W - 90]
-
-    tbl = Table(rows, colWidths=col_widths)
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 11),
-        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("BACKGROUND", (0,1), (-1,-1), colors.whitesmoke),
-        ("LEFTPADDING", (0,0), (-1,-1), 6),
-        ("RIGHTPADDING", (0,0), (-1,-1), 6),
-        ("TOPPADDING", (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-    ]))
-
-    story += [tbl, Spacer(1, 8), Paragraph("Analytics only • No guaranteed outcomes • 18+ • Play responsibly.", note_style)]
-    doc.build(story)
-    return buf.getvalue()
-
-
-def make_full_report(
-    game: str,
-    tickets,
-    strategy: str,
-    seed: int,
-    hotcold: dict,
-    lookback: int,
-    alpha: float,
-    constraints: dict,
-    backtest_df: pd.DataFrame,
-    hotline_text: str = None,
-) -> bytes:
-    """
-    Full, auditable Insights Report (landscape):
-      • Page 1: Cover + Hot/Cold/Strategy summary (auto from hotcold)
-      • Page 2: Methodology, Disclaimer, Run Details, Constraints
-      • Page 3: Ticket Pack table (current run)
-      • Page 4: Backtest (last N draws) + summary
-    """
-    buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=landscape(A4),
-        leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36
-    )
-
-    styles = getSampleStyleSheet()
-    header_style = ParagraphStyle(
-        "Header", parent=styles["Heading1"], fontName="Helvetica-Bold",
-        fontSize=28, textColor=colors.white, backColor=colors.HexColor("#0d0d0d"),
-        alignment=1, spaceAfter=18, leading=34
-    )
-    subheader = ParagraphStyle("Subheader", parent=styles["Heading3"], fontSize=15, fontName="Helvetica-Bold")
-    normal = ParagraphStyle("Normal", parent=styles["Normal"], fontSize=11, leading=15)
-    muted = ParagraphStyle("Muted", parent=styles["Normal"], fontSize=9.5, textColor=colors.HexColor("#666666"), leading=13)
-
-    PAGE_W, PAGE_H = landscape(A4)
-    CONTENT_W = PAGE_W - 72  # 36+36 margins
-
-    def comma(nums):
-        return ", ".join(map(str, nums)) if nums else "—"
-
-    # ---------- Page 1: Cover + Hot/Cold ----------
-    story = []
-    story.append(Paragraph("SmartPlay AI — Insights Report", header_style))
-    story.append(Paragraph(datetime.utcnow().strftime("Generated %Y-%m-%d (UTC)"), muted))
-    story.append(Spacer(1, 10))
-
-    story.append(Paragraph(
-        "<strong>SmartPlay AI</strong> highlights hot and cold number trends and produces balanced ticket sets. "
-        f"This report summarizes current guidance for <em>{DISPLAY_NAMES['lotto']}</em>, "
-        f"<em>{DISPLAY_NAMES['super']}</em>, and <em>{DISPLAY_NAMES['powerball']}</em>.",
-        normal
-    ))
-    story.append(Spacer(1, 12))
-
-    nice_game = DISPLAY_NAMES[game]
-    main_hot = hotcold.get("hot_main", [])
-    main_cold = hotcold.get("cold_main", [])
-    rec_strategy = {"lotto": "Blend (≥2 hot, ≥2 cold)", "super": "Cold emphasis + SB spread", "powerball": "Blend whites, random PB"}[game]
-
-    w1, w2, w3, w4 = 200, 230, 230, CONTENT_W - (200 + 230 + 230)
-    summary_rows = [
-        ["Game", "Suggested Hot Numbers", "Suggested Cold/Overdue", "Recommended Strategy"],
-        [nice_game, comma(main_hot), comma(main_cold), rec_strategy],
-    ]
-    summary_tbl = Table(summary_rows, colWidths=[w1, w2, w3, w4])
-    summary_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 11),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
-        ("BACKGROUND", (0,1), (-1,-1), colors.whitesmoke),
-        ("LEFTPADDING", (0,0), (-1,-1), 6),
-        ("RIGHTPADDING", (0,0), (-1,-1), 6),
-        ("TOPPADDING", (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-    ]))
-    story.append(summary_tbl)
-
-    story.append(PageBreak())
-
-    # ---------- Page 2: Methodology, Disclaimer, Run details, Constraints ----------
-    section = []
-
-    # Hot/Cold computation window line
-    section.append(Paragraph("Computation Window", subheader))
-    section.append(Paragraph(
-        f"Hot/cold computed on last <strong>{lookback}</strong> draws with recency weight "
-        f"<strong>EWMA α = {alpha}</strong> (most recent draw has highest weight).", normal
-    ))
-    section.append(Spacer(1, 6))
-
-    # Methodology & Disclaimer
-    section.append(Paragraph("Methodology (Overview)", subheader))
-    section.append(Paragraph(
-        "We compute recency-weighted frequencies to classify numbers into <strong>hot</strong> (recently common), "
-        "<strong>cold/overdue</strong> (rare lately), and <strong>neutral</strong>. We then generate tickets using "
-        "controlled randomness with constraints (e.g., minimum hot/cold counts) and optional clustering "
-        "(e.g., overdue cluster 2–4–5–37).", normal
-    ))
-    section.append(Spacer(1, 8))
-
-    section.append(Paragraph("Disclaimer", subheader))
-    section.append(Paragraph(
-        "This report is for entertainment and analysis only. It does not guarantee outcomes. Must be 18+. "
-        "Play responsibly." + (f" {hotline_text}" if hotline_text else ""),
-        muted
-    ))
-    section.append(Spacer(1, 10))
-
-    # Run details
-    section.append(Paragraph("Run Details", subheader))
-    run_rows = [
-        ["Field", "Value"],
-        ["Game", nice_game],
-        ["Strategy", strategy],
-        ["Tickets generated", str(len(tickets))],
-        ["Seed", str(seed)],
-        ["Report version", REPORT_VERSION],
-    ]
-    run_tbl = Table(run_rows, colWidths=[220, CONTENT_W - 220])
-    run_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("BACKGROUND", (0,1), (-1,-1), colors.whitesmoke),
-    ]))
-    section.append(run_tbl)
-    section.append(Spacer(1, 10))
-
-    # Strategy constraints used
-    section.append(Paragraph("Strategy Constraints (Applied)", subheader))
-    def cfmt(v):
-        if isinstance(v, (list, tuple)): return ", ".join(map(str, v))
-        return str(v)
-    bullets = [
-        f"Min Hot per ticket: <strong>{cfmt(constraints.get('min_hot','—'))}</strong>",
-        f"Min Cold per ticket: <strong>{cfmt(constraints.get('min_cold','—'))}</strong>",
-        f"Overdue Cluster: <strong>{cfmt(constraints.get('cluster', []))}</strong>",
-        f"Parity target: <strong>{cfmt(constraints.get('parity_target','—'))}</strong>",
-        f"Sum range: <strong>{cfmt(constraints.get('sum_range','—'))}</strong>",
-    ]
-    section.append(Paragraph(" • " + "<br/> • ".join(bullets), normal))
-
-    # Changelog / Versioning
-    section.append(Spacer(1, 10))
-    section.append(Paragraph("Changelog / Versioning", subheader))
-    section.append(Paragraph(
-        f"<strong>{REPORT_VERSION}</strong> — Added Next Draw Calendar and unified display names; "
-        "kept auto hot/cold, constraints, and backtest page.",
-        normal
-    ))
-
-    story.append(KeepTogether(section))
-    story.append(PageBreak())
-
-    # ---------- Page 3: Ticket Pack ----------
-    story.append(Paragraph(f"Generated Ticket Pack — {nice_game}", subheader))
-    if game == "lotto":
-        rows = [["Ticket", "Numbers"]] + [[f"Lotto {i+1}", comma(nums)] for i, nums in enumerate(tickets)]
-        col_widths = [220, CONTENT_W - 220]
-    elif game == "super":
-        rows = [["Ticket", "Numbers (main)", "SB"]] + [[f"Super {i+1}", comma(m), str(sb)] for i, (m, sb) in enumerate(tickets)]
-        col_widths = [220, CONTENT_W - 220 - 100, 100]
-    else:  # powerball
-        rows = [["Ticket", "Numbers (whites)", "PB"]] + [[f"Powerball {i+1}", comma(w), str(pb)] for i, (w, pb) in enumerate(tickets)]
-        col_widths = [220, CONTENT_W - 220 - 100, 100]
-
-    t2 = Table(rows, colWidths=col_widths)
-    t2.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("BACKGROUND", (0,1), (-1,-1), colors.whitesmoke),
-        ("LEFTPADDING", (0,0), (-1,-1), 6),
-        ("RIGHTPADDING", (0,0), (-1,-1), 6),
-        ("TOPPADDING", (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-    ]))
-    story.append(t2)
-    story.append(PageBreak())
-
-    # ---------- Page 4: Backtest ----------
-    story.append(Paragraph("Backtest — Last N Draws", subheader))
-    story.append(Paragraph("Per draw, the best hit among your ticket pack.", muted))
-    if backtest_df is not None and not backtest_df.empty:
-        bt = backtest_df.copy()
-        bt["date"] = bt["date"].astype(str)
-        bt = bt.rename(columns={"best_tier": "Tier", "best_matches": "Hits"})[["date", "Hits", "Tier"]]
-        bt_rows = [bt.columns.tolist()] + bt.values.tolist()
-        bt_tbl = Table(bt_rows, colWidths=[260, 120, CONTENT_W - 380])
-        bt_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#0d0d0d")),
-            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ("GRID", (0,0), (-1,-1), 0.3, colors.HexColor("#CCCCCC")),
-            ("ALIGN", (0,0), (-1,-1), "CENTER"),
-            ("BACKGROUND", (0,1), (-1,-1), colors.whitesmoke),
-        ]))
-        story.append(bt_tbl)
-
-        s_hits = int(bt["Hits"].sum())
-        top_tier = bt["Tier"].value_counts().idxmax() if not bt["Tier"].empty else "—"
-        story.append(Spacer(1, 8))
-        story.append(Paragraph(
-            f"Summary: total hits across period = <strong>{s_hits}</strong>; most common tier = <strong>{top_tier}</strong>.",
-            normal
-        ))
-    else:
-        story.append(Paragraph("No historical data connected. Add CSV URLs in Secrets to enable backtesting.", normal))
-
-    doc.build(story)
-    return buf.getvalue()
-
-
-# -----------------------------------------------------------
-# Custom ticket parsing & validation
-# -----------------------------------------------------------
-def pool_bounds(game: str) -> dict:
-    if game == "lotto":      # 6 from 1..38
-        return {"main_min": 1, "main_max": 38, "main_count": 6, "special": None}
-    if game == "super":      # 5 from 1..35 + SB 1..10
-        return {"main_min": 1, "main_max": 35, "main_count": 5, "special": (1, 10)}
-    if game == "powerball":  # 5 from 1..69 + PB 1..26
-        return {"main_min": 1, "main_max": 69, "main_count": 5, "special": (1, 26)}
-    return {"main_min": 1, "main_max": 0, "main_count": 0, "special": None}
-
-
-def validate_main(nums: List[int], main_min: int, main_max: int, main_count: int) -> Tuple[bool, str]:
-    if len(nums) != main_count:
-        return False, f"Need exactly {main_count} main numbers; got {len(nums)}."
-    if len(set(nums)) != len(nums):
-        return False, "Duplicate numbers in a ticket."
-    bad = [n for n in nums if n < main_min or n > main_max]
-    if bad:
-        return False, f"Numbers out of range {main_min}-{main_max}: {bad}"
-    return True, ""
-
-
-def parse_custom_input(game: str, text: str) -> Tuple[List, List[str]]:
-    """
-    Supported formats (one ticket per line):
-      - Jamaica Lotto:      04 08 12 21 30 33
-      - Caribbean Super Lotto: 03 14 18 24 28 | 5
-      - USA Powerball:      04 08 12 21 30 | 10
-    """
-    cfg = pool_bounds(game)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    tickets, errors = [], []
-
-    for i, ln in enumerate(lines, 1):
-        parts = [p.strip() for p in ln.replace(",", " ").split("|")]
-        left = parts[0]
-        try:
-            main = [int(x) for x in left.split() if x.strip().isdigit()]
-        except Exception:
-            errors.append(f"Line {i}: Could not parse numbers.")
-            continue
-
-        ok, msg = validate_main(main, cfg["main_min"], cfg["main_max"], cfg["main_count"])
-        if not ok:
-            errors.append(f"Line {i}: {msg}")
-            continue
-
-        if cfg["special"] is None:
-            tickets.append(sorted(main))
-        else:
-            if len(parts) != 2:
-                errors.append(f"Line {i}: Missing special ball after '|' (e.g., '| 5').")
-                continue
-            try:
-                sp = int(parts[1].split()[0])
-            except Exception:
-                errors.append(f"Line {i}: Could not read special ball.")
-                continue
-            lo, hi = cfg["special"]
-            if not (lo <= sp <= hi):
-                errors.append(f"Line {i}: Special ball out of range {lo}-{hi}.")
-                continue
-            tickets.append((sorted(main), sp))
-
-    return tickets, errors
-
-
-# Ticket normalization & de-dupe
-def norm_ticket(game: str, t):
-    if game == "lotto":
-        return tuple(sorted(t))
-    return (tuple(sorted(t[0])), int(t[1]))
-
-def dedupe_tickets(game: str, tickets):
-    seen, out = set(), []
-    for t in tickets:
-        key = norm_ticket(game, t)
-        if key not in seen:
-            seen.add(key)
-            out.append(t)
-    return out
-
-
-# CSV template bytes
-def template_csv_bytes(game: str) -> bytes:
-    if game == "lotto":
-        content = "N1,N2,N3,N4,N5,N6\n4,8,12,21,30,33\n2,7,14,19,25,37\n6,9,10,16,27,38\n"
-        return content.encode("utf-8")
-    if game == "super":
-        content = "N1,N2,N3,N4,N5,SB\n3,14,18,24,28,5\n2,8,13,21,30,9\n5,9,19,27,33,1\n"
-        return content.encode("utf-8")
-    content = "W1,W2,W3,W4,W5,PB\n4,8,12,21,30,10\n11,22,33,44,55,4\n7,16,24,39,48,12\n"
-    return content.encode("utf-8")
-
-
-# -----------------------------------------------------------
-# Sidebar UI (with random seed + custom input)
-# -----------------------------------------------------------
-st.sidebar.header("Generator")
-
-# Use display names in the dropdown, map back to internal keys
-display_options = [DISPLAY_NAMES[k] for k in ["lotto", "super", "powerball"]]
-chosen_display = st.sidebar.selectbox("Game", display_options, index=0)
-# reverse map:
-reverse_map = {v: k for k, v in DISPLAY_NAMES.items()}
-game = reverse_map[chosen_display]
-
-strategy = st.sidebar.selectbox("Strategy", ["blend", "cold", "none"])
-num_tix = st.sidebar.number_input("Tickets", min_value=1, max_value=50, value=7)
-
-# Seed handling
-if "seed" not in st.session_state:
-    st.session_state.seed = random.randint(1, 99999999)
-
-st.sidebar.write(f"🔄 Current seed: `{st.session_state.seed}`")
-auto_new_seed = st.sidebar.checkbox("Use a new random seed each time", value=True)
-if st.sidebar.button("🎲 Reroll seed now"):
-    st.session_state.seed = random.randint(1, 99999999)
-    st.sidebar.success(f"New seed: {st.session_state.seed}")
-
-premium_input = st.sidebar.text_input("Premium Access (optional)", type="password")
-pdf_layout = st.sidebar.radio("Print slip layout", ["Landscape", "Portrait"], index=0)
-
-# Custom input controls
-use_custom = st.sidebar.checkbox("Enter my own tickets", value=False, help="Paste your tickets (one per line) or upload CSV.")
-custom_text = ""
-uploaded_csv = None
-
-if use_custom:
-    st.sidebar.caption("Formats:")
-    st.sidebar.code(
-        "Jamaica Lotto:           04 08 12 21 30 33\n"
-        "Caribbean Super Lotto:    03 14 18 24 28 | 5\n"
-        "USA Powerball:            04 08 12 21 30 | 10",
-        language="text",
-    )
-    custom_text = st.sidebar.text_area("Paste tickets", height=140, placeholder="One ticket per line…\n04 08 12 21 30 33")
-    uploaded_csv = st.sidebar.file_uploader("…or upload CSV", type=["csv"], help="Lotto: N1..N6;  Super: N1..N5,SB;  Powerball: W1..W5,PB")
-
-    # Template download
-    st.sidebar.download_button(
-        label="⬇️ Download CSV template",
-        data=template_csv_bytes(game),
-        file_name=("lotto_template.csv" if game == "lotto" else "super_template.csv" if game == "super" else "powerball_template.csv"),
-        mime="text/csv",
-        help="Download a sample CSV with the correct columns for this game."
-    )
-
-    # Combine & nudging options
-    top_up = st.sidebar.checkbox("Top up with generated tickets to reach N", value=True)
-    nudge_custom = st.sidebar.checkbox("Apply strategy nudges to custom tickets", value=False)
-else:
-    top_up = True
-    nudge_custom = False
-
-generate = st.sidebar.button("Generate")
-
-
-# -----------------------------------------------------------
-# Main — Header + Next Draw Calendar
-# -----------------------------------------------------------
-st.title("SmartPlay AI 🎯")
-st.caption(f"{DISPLAY_NAMES['lotto']} • {DISPLAY_NAMES['super']} • {DISPLAY_NAMES['powerball']}")
+# -----------------------
+# THEME CSS + HEADER (animated wormhole infinity)
+# -----------------------
 st.markdown(
-    f'New here? 👉 **[Download Sample Report]({SAMPLE_REPORT_URL})** · **[Subscribe for Premium Packs]({STRIPE_LINK})**'
+    """
+    <style>
+      :root{
+        --flag-blue:#002868; --flag-blue-bright:#0a3ca6;
+        --flag-red:#bf0a30;  --flag-red-strong:#ff2a4f;
+        --flag-white:#ffffff;
+        --ease:cubic-bezier(.2,.8,.2,1);
+      }
+      /* Global background */
+      .stApp, .main, .block-container {
+        background: radial-gradient(1400px 900px at 20% -10%, #0b0e15 0%, #04060a 45%, #000 100%) !important;
+        color: #fff !important;
+      }
+      /* Hide native Streamlit hamburger/footer for a cleaner "app" feel */
+      #MainMenu, footer {visibility: hidden;}
+      /* Banner pill */
+      .spa-banner {
+        display: inline-flex; align-items:center; justify-content:center;
+        padding: 14px 30px; border-radius: 999px;
+        background: linear-gradient(180deg, #083382, var(--flag-blue));
+        color: var(--flag-white); font-weight: 900; font-size: 38px; letter-spacing: .04em;
+        text-transform: uppercase; box-shadow: 0 10px 40px rgba(0,40,104,.45), 0 0 0 10px rgba(255,255,255,.06);
+      }
+      /* Subtle stars across whole page */
+      .spa-stars, .spa-stars:before, .spa-stars:after{
+        content:""; position: fixed; inset: -10%; pointer-events:none; opacity:.28; z-index: 0;
+        background:
+          radial-gradient(2px 2px at 10% 20%, rgba(255,255,255,.95) 40%, transparent 41%),
+          radial-gradient(2px 2px at 80% 30%, rgba(255,255,255,.8) 40%, transparent 41%),
+          radial-gradient(1.5px 1.5px at 40% 60%, rgba(255,255,255,.6) 40%, transparent 41%),
+          radial-gradient(1.5px 1.5px at 70% 80%, rgba(255,255,255,.6) 40%, transparent 41%);
+        animation: spaTwinkle 9s linear infinite;
+      }
+      .spa-stars:before{ animation-duration:13s; opacity:.22; }
+      .spa-stars:after{ animation-duration:17s; opacity:.18; }
+      @keyframes spaTwinkle{ 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+
+      /* Number ball (checkbox) styling */
+      .ball-wrap{
+        display:flex; align-items:center; justify-content:center;
+      }
+      .ball {
+        appearance: none;
+        width: 58px; height: 58px; border-radius: 50%;
+        border: 3.5px solid var(--flag-blue);
+        background: radial-gradient(120% 120% at 30% 25%, #ffffff 0%, #f2f2f2 55%, #e1e1e1 100%);
+        box-shadow: 0 8px 18px rgba(0,0,0,.35), 0 0 0 8px rgba(0,40,104,.12), inset 0 10px 18px rgba(0,0,0,.08);
+        display:grid; place-items:center; cursor:pointer; position: relative;
+        transition: transform .18s var(--ease), box-shadow .18s var(--ease), border-color .18s var(--ease);
+      }
+      .ball:hover{
+        transform: translateY(-2px) scale(1.04);
+        border-color: var(--flag-red);
+        box-shadow: 0 10px 24px rgba(0,0,0,.45), 0 0 0 12px rgba(191,10,48,.18);
+      }
+      .ball:checked{
+        border-color: var(--flag-blue);
+        background: radial-gradient(120% 120% at 30% 25%, #ffffff 0%, #dfe9ff 55%, #c8daff 100%);
+        box-shadow: 0 10px 26px rgba(0,0,0,.55), 0 0 0 12px rgba(0,40,104,.12), inset 0 10px 16px rgba(255,255,255,.35);
+      }
+      .ball-label{
+        position:absolute; inset:0; display:grid; place-items:center;
+        font-weight:900; color: var(--flag-blue);
+      }
+      .ball:checked + .ball-label{ color:#0b1020; }
+
+      /* CTA buttons */
+      .stButton > button {
+        border-radius: 999px; padding: 12px 20px; font-weight: 900;
+        box-shadow: 0 14px 40px rgba(191,10,48,.25);
+      }
+      .btn-primary > button{
+        background: linear-gradient(180deg, var(--flag-red), #e11c3f); color: #fff; border:0;
+      }
+      .btn-secondary > button{
+        background: rgba(255,255,255,.08); color:#fff; border:1px solid rgba(255,255,255,.15);
+      }
+
+      /* Tighten block container for a cleaner feel */
+      .block-container { padding-top: 16px; }
+    </style>
+    <div class="spa-stars"></div>
+    """,
+    unsafe_allow_html=True,
 )
-st.markdown("---")
 
-# Next Draw Calendar (next 6 dates for each game)
-st.subheader("📅 Next Draw Calendar")
-today = date.today()
-rows = []
-for key in ["lotto", "super", "powerball"]:
-    sched = get_schedule_from_secrets(key)
-    ndates = next_draw_dates(sched, today, k=6)
-    rows.append({
-        "Game": DISPLAY_NAMES[key],
-        "Upcoming draws": ", ".join(d.strftime("%Y-%m-%d") for d in ndates)
-    })
-cal_df = pd.DataFrame(rows, columns=["Game", "Upcoming draws"])
-st.dataframe(cal_df, use_container_width=True)
-st.caption("Schedules are typical defaults. You can override weekdays via Secrets (e.g., LOTTO_DRAW_WEEKDAYS='2,5').")
-st.markdown("---")
+# Animated Infinity header (as a single HTML/SVG component)
+st.components.v1.html(
+    """
+    <div style="display:flex;justify-content:center;margin:8px 0 4px; position:relative; z-index:1;">
+      <div class="spa-banner">LOTTERY</div>
+    </div>
+    <div style="display:flex;justify-content:center;margin-top:4px; position:relative; z-index:1;">
+      <svg viewBox="0 0 1100 360" style="width:min(1100px,96vw); height:360px; overflow:visible;">
+        <defs>
+          <path id="path∞" d="M140,180 C240,60 360,60 500,180 C640,300 760,300 960,180 C760,60 640,60 500,180 C360,300 240,300 140,180Z" />
+          <linearGradient id="gradRB" x1="0%" y1="50%" x2="100%" y2="50%">
+            <stop offset="0%"  stop-color="#bf0a30"/>
+            <stop offset="48%" stop-color="#ff2a4f"/>
+            <stop offset="52%" stop-color="#0a3ca6"/>
+            <stop offset="100%" stop-color="#002868"/>
+          </linearGradient>
+          <linearGradient id="innerLight" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="rgba(255,255,255,.95)"/>
+            <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+          </linearGradient>
+          <filter id="outerGlow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="12" result="b"/>
+            <feColorMatrix in="b" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0.85 0" result="m"/>
+            <feBlend in="SourceGraphic" in2="m" mode="screen"/>
+          </filter>
+          <filter id="innerGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="7" result="b"/>
+            <feComposite in="b" in2="SourceAlpha" operator="in" result="i"/>
+            <feBlend in="SourceGraphic" in2="i" mode="screen"/>
+          </filter>
+          <path id="whirlL" d="M350,180 m-120,0 a120,120 0 1,0 240,0 a120,120 0 1,0 -240,0" />
+          <path id="whirlR" d="M750,180 m-120,0 a120,120 0 1,0 240,0 a120,120 0 1,0 -240,0" />
+        </defs>
+        <!-- triple-thick tube -->
+        <use href="#path∞" stroke="url(#gradRB)" stroke-width="78" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#outerGlow)"/>
+        <use href="#path∞" stroke="url(#gradRB)" stroke-width="66" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
+        <use href="#path∞" stroke="url(#innerLight)" stroke-width="40" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#innerGlow)" opacity=".85"/>
+        <!-- scrolling numbers along main path -->
+        <g font-weight="900" font-size="22" fill="#ffffff" filter="url(#innerGlow)">
+          <text>
+            <textPath href="#path∞" startOffset="0%">
+              1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •
+              <animate attributeName="startOffset" values="0%;30%;0%" dur="12s" repeatCount="indefinite"/>
+            </textPath>
+          </text>
+          <text opacity=".7">
+            <textPath href="#path∞" startOffset="50%">
+              0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 • 0 9 8 7 6 5 4 3 2 1 •
+              <animate attributeName="startOffset" values="50%;80%;50%" dur="14s" repeatCount="indefinite"/>
+            </textPath>
+          </text>
+        </g>
+        <!-- inner whirlwinds -->
+        <g font-weight="900" font-size="18" fill="#ffffff">
+          <text>
+            <textPath href="#whirlL" startOffset="0%">1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •</textPath>
+            <animateTransform attributeName="transform" type="rotate" from="0 350 180" to="360 350 180" dur="6s" repeatCount="indefinite"/>
+          </text>
+          <text opacity=".75">
+            <textPath href="#whirlL" startOffset="50%">5 4 3 2 1 0 9 8 7 6 • 5 4 3 2 1 0 9 8 7 6 •</textPath>
+            <animateTransform attributeName="transform" type="rotate" from="0 350 180" to="-360 350 180" dur="9s" repeatCount="indefinite"/>
+          </text>
+          <text>
+            <textPath href="#whirlR" startOffset="0%">1 2 3 4 5 6 7 8 9 0 • 1 2 3 4 5 6 7 8 9 0 •</textPath>
+            <animateTransform attributeName="transform" type="rotate" from="0 750 180" to="-360 750 180" dur="6.5s" repeatCount="indefinite"/>
+          </text>
+          <text opacity=".75">
+            <textPath href="#whirlR" startOffset="50%">5 4 3 2 1 0 9 8 7 6 • 5 4 3 2 1 0 9 8 7 6 •</textPath>
+            <animateTransform attributeName="transform" type="rotate" from="0 750 180" to="360 750 180" dur="10s" repeatCount="indefinite"/>
+          </text>
+        </g>
+      </svg>
+    </div>
+    """,
+    height=420,
+)
 
-st.caption("Analytics only • No guaranteed outcomes • 18+ • Play responsibly.")
+# -----------------------
+# GAME SELECTION (user-facing)
+# -----------------------
+st.markdown("<div style='text-align:center;margin-top:-8px;'><h3>Select Your Game</h3></div>", unsafe_allow_html=True)
+game = st.radio(
+    " ",
+    list(GAMES.keys()),
+    horizontal=True,
+    label_visibility="collapsed",
+    index=list(GAMES.keys()).index(st.session_state.game),
+)
+if game != st.session_state.game:
+    st.session_state.game = game
+    st.session_state.main_selected = set()
+    st.session_state.special_selected = set()
+    st.session_state.show_more_main = False
+    st.session_state.show_more_special = False
 
-# -----------------------------------------------------------
-# Generate flow
-# -----------------------------------------------------------
-if generate:
-    # Use current seed for this run
-    seed = int(st.session_state.seed)
-    random.seed(seed)
+cfg = GAMES[st.session_state.game]
 
-    # ---------- 1) Parse custom input (text and/or CSV) ----------
-    custom_tix, custom_errors = [], []
+# -----------------------
+# NUMBER GRID (user-facing)
+# -----------------------
+st.markdown("<div style='text-align:center; margin: 6px 0 8px; font-weight: 800; font-size: 22px;'>Select Your Numbers</div>", unsafe_allow_html=True)
 
-    if use_custom and uploaded_csv is not None:
-        try:
-            df_in = pd.read_csv(uploaded_csv)
-            cfg = pool_bounds(game)
-            if game == "lotto":
-                needed = ["N1","N2","N3","N4","N5","N6"]
-                if all(c in df_in.columns for c in needed):
-                    for _, r in df_in.iterrows():
-                        row = [int(r[c]) for c in needed]
-                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
-                        if ok: custom_tix.append(sorted(row))
-                        else:  custom_errors.append(f"CSV row invalid: {msg}")
-                else:
-                    custom_errors.append("CSV needs columns: N1..N6")
-            elif game == "super":
-                needed = ["N1","N2","N3","N4","N5","SB"]
-                if all(c in df_in.columns for c in needed):
-                    for _, r in df_in.iterrows():
-                        row = [int(r[c]) for c in ["N1","N2","N3","N4","N5"]]
-                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
-                        sb = int(r["SB"])
-                        if ok and cfg["special"][0] <= sb <= cfg["special"][1]:
-                            custom_tix.append((sorted(row), sb))
-                        else:
-                            custom_errors.append("CSV row invalid (main or SB out of range).")
-                else:
-                    custom_errors.append("CSV needs columns: N1..N5,SB")
-            else:  # powerball
-                needed = ["W1","W2","W3","W4","W5","PB"]
-                if all(c in df_in.columns for c in needed):
-                    for _, r in df_in.iterrows():
-                        row = [int(r[c]) for c in ["W1","W2","W3","W4","W5"]]
-                        ok, msg = validate_main(row, cfg["main_min"], cfg["main_max"], cfg["main_count"])
-                        pb = int(r["PB"])
-                        if ok and cfg["special"][0] <= pb <= cfg["special"][1]:
-                            custom_tix.append((sorted(row), pb))
-                        else:
-                            custom_errors.append("CSV row invalid (whites or PB out of range).")
-                else:
-                    custom_errors.append("CSV needs columns: W1..W5,PB")
-        except Exception as e:
-            custom_errors.append(f"CSV read error: {e}")
+preview = min(28, cfg["main_range"])
+show_count = cfg["main_range"] if st.session_state.show_more_main else preview
 
-    if use_custom and custom_text:
-        tix, errs = parse_custom_input(game, custom_text)
-        custom_tix.extend(tix)
-        custom_errors.extend(errs)
+cols_per_row = 8
+rows = (show_count + cols_per_row - 1) // cols_per_row
 
-    # De-dupe custom list
-    custom_tix = dedupe_tickets(game, custom_tix)
+for r in range(rows):
+    cols = st.columns(cols_per_row, gap="small")
+    for i, c in enumerate(cols):
+        n = r * cols_per_row + i + 1
+        if n > show_count:
+            continue
+        key = f"main_{n}"
+        checked = (n in st.session_state.main_selected)
+        with c:
+            st.markdown(
+                f"""
+                <div class="ball-wrap">
+                  <input type="checkbox" id="{key}" {'checked' if checked else ''} class="ball" onclick="this.dispatchEvent(new Event('change', {{bubbles:true}}));">
+                  <label for="{key}" class="ball-label">{n}</label>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            # sync change back to session_state
+            if st.session_state.get(key) is None:
+                st.session_state[key] = checked
+            # The trick: use a hidden checkbox to capture state changes
+            _flip = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
+            # reconcile
+            if _flip and n not in st.session_state.main_selected:
+                st.session_state.main_selected.add(n)
+            if not _flip and n in st.session_state.main_selected:
+                st.session_state.main_selected.remove(n)
 
-    if custom_errors:
-        st.error("Custom input issues:\n- " + "\n- ".join(custom_errors))
-
-    # ---------- 2) Generate to fill up (if requested) ----------
-    generated = []
-    if top_up:
-        need = max(0, num_tix - len(custom_tix))
-        if need > 0:
-            if game == "lotto":
-                generated = gen_lotto(need)
-            elif game == "super":
-                generated = gen_super(need)
-            else:
-                generated = gen_powerball(need)
-
-    # If not topping up and user supplied 0, generate all
-    if not top_up and len(custom_tix) == 0:
-        if game == "lotto":
-            generated = gen_lotto(num_tix)
-        elif game == "super":
-            generated = gen_super(num_tix)
+# Show more / less
+cta_cols = st.columns([1,1,1])
+with cta_cols[1]:
+    if cfg["main_range"] > preview:
+        if not st.session_state.show_more_main:
+            if st.button(f"Show {cfg['main_range'] - preview} more", key="main_more", help="Reveal the full number range"):
+                st.session_state.show_more_main = True
+                st.rerun()
         else:
-            generated = gen_powerball(num_tix)
+            if st.button("Show less", key="main_less"):
+                st.session_state.show_more_main = False
+                st.rerun()
 
-    # ---------- 3) Combine, optionally nudge custom, and de-dupe ----------
-    base = custom_tix + generated
-    if len(base) == 0:
-        st.warning("No valid tickets supplied and generation disabled. Nothing to run.")
-        st.stop()
+# Special ball section
+if cfg["special"]:
+    st.markdown(
+        f"<div style='text-align:center; margin: 12px 0 6px; font-weight: 800;'>"
+        f"{cfg['special']['label']} (pick {cfg['special']['picks']} of {cfg['special']['range']})</div>",
+        unsafe_allow_html=True,
+    )
+    sp_preview = min(28, cfg["special"]["range"])
+    sp_show_count = cfg["special"]["range"] if st.session_state.show_more_special else sp_preview
+    rows = (sp_show_count + cols_per_row - 1) // cols_per_row
+    for r in range(rows):
+        cols = st.columns(cols_per_row, gap="small")
+        for i, c in enumerate(cols):
+            n = r * cols_per_row + i + 1
+            if n > sp_show_count:
+                continue
+            key = f"special_{n}"
+            checked = (n in st.session_state.special_selected)
+            with c:
+                st.markdown(
+                    f"""
+                    <div class="ball-wrap">
+                      <input type="checkbox" id="{key}" {'checked' if checked else ''} class="ball" onclick="this.dispatchEvent(new Event('change', {{bubbles:true}}));">
+                      <label for="{key}" class="ball-label">{n}</label>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                # mirror to state (limit to 1 by replacing earliest)
+                _flip = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
+                if _flip and n not in st.session_state.special_selected:
+                    if len(st.session_state.special_selected) >= cfg["special"]["picks"]:
+                        first = next(iter(st.session_state.special_selected))
+                        st.session_state.special_selected.remove(first)
+                        st.session_state[f"special_{first}_mirror"] = False
+                    st.session_state.special_selected.add(n)
+                if not _flip and n in st.session_state.special_selected:
+                    st.session_state.special_selected.remove(n)
 
-    # Hot/Cold from data (or defaults)
-    LOOKBACK = 60
-    ALPHA = 0.97
-    draws = get_game_draws(game)
-    hotcold = compute_hot_cold(game, draws, lookback=LOOKBACK, alpha=ALPHA)
+    with cta_cols[1]:
+        if cfg["special"]["range"] > sp_preview:
+            if not st.session_state.show_more_special:
+                if st.button(f"Show {cfg['special']['range'] - sp_preview} more", key="sp_more"):
+                    st.session_state.show_more_special = True
+                    st.rerun()
+            else:
+                if st.button("Show less", key="sp_less"):
+                    st.session_state.show_more_special = False
+                    st.rerun()
 
-    # Strategy: apply to generated; optionally to user’s custom as well (Lotto only)
-    if game == "lotto" and strategy in ("blend", "cold"):
-        base_custom = custom_tix[:]
-        base_gen = generated[:]
+# -----------------------
+# ACTIONS (user-facing)
+# -----------------------
+a1, a2, a3 = st.columns(3)
+with a1:
+    if st.button("AI Suggest", key="ai_suggest", help="Let SmartPlayAI choose a set"):
+        main, special = suggest_for_game(st.session_state.game)
+        # reset mirrors
+        for n in range(1, cfg["main_range"]+1):
+            mk = f"main_{n}_mirror"
+            if mk in st.session_state: st.session_state[mk] = False
+        st.session_state.main_selected = set(main)
+        for n in main:
+            st.session_state[f"main_{n}_mirror"] = True
 
-        if use_custom and nudge_custom and base_custom:
-            base_custom = apply_strategy(game, base_custom, strategy, hotcold)
-        if base_gen:
-            base_gen = apply_strategy(game, base_gen, strategy, hotcold)
+        if cfg["special"]:
+            for n in range(1, cfg["special"]["range"]+1):
+                sk = f"special_{n}_mirror"
+                if sk in st.session_state: st.session_state[sk] = False
+            st.session_state.special_selected = set(special)
+            for n in special:
+                st.session_state[f"special_{n}_mirror"] = True
+        st.success(f"AI Suggested {main}" + (f" | {cfg['special']['label']}: {special}" if cfg["special"] else ""))
+        st.rerun()
 
-        tickets = base_custom + base_gen
-    else:
-        tickets = base
+with a2:
+    if st.button("Submit", key="submit", help="Validate your selection"):
+        errors = []
+        if len(st.session_state.main_selected) != cfg["main_picks"]:
+            errors.append(f"Pick exactly {cfg['main_picks']} main numbers.")
+        if cfg["special"] and len(st.session_state.special_selected) != cfg["special"]["picks"]:
+            errors.append(f"Pick exactly {cfg['special']['picks']} {cfg['special']['label']}.")
+        if errors:
+            st.error(" ".join(errors))
+        else:
+            st.success("Selection looks good! You can generate your PDF report below.")
 
-    # Final de-dupe and trim to N
-    tickets = dedupe_tickets(game, tickets)[:num_tix]
-
-    # Show as a table
-    if game == "lotto":
-        df = pd.DataFrame(tickets, columns=[f"N{i}" for i in range(1, 7)])
-    elif game == "super":
-        df = pd.DataFrame(
-            [{"N1": t[0][0], "N2": t[0][1], "N3": t[0][2], "N4": t[0][3], "N5": t[0][4], "SB": t[1]} for t in tickets]
+with a3:
+    ready = (len(st.session_state.main_selected) == cfg["main_picks"]) and (
+        (not cfg["special"]) or (len(st.session_state.special_selected) == cfg["special"]["picks"])
+    )
+    if st.button("Generate PDF", key="pdf", help="Download your selection as a PDF", disabled=not ready):
+        pdf_bytes = pdf_report(
+            st.session_state.game,
+            sorted(st.session_state.main_selected),
+            sorted(st.session_state.special_selected),
         )
-    else:
-        df = pd.DataFrame(
-            [{"W1": t[0][0], "W2": t[0][1], "W3": t[0][2], "W4": t[0][3], "W5": t[0][4], "PB": t[1]} for t in tickets]
+        st.download_button(
+            "Download Report",
+            data=pdf_bytes,
+            file_name="smartplayai_report.pdf",
+            mime="application/pdf",
         )
 
-    st.subheader("Generated Tickets")
-    st.dataframe(df, use_container_width=True)
-    st.caption(f"Seed used for this run: **{seed}**")
-
-    # CSV download
-    csv_buf = BytesIO()
-    df.to_csv(csv_buf, index=False)
-    st.download_button("Download CSV", csv_buf.getvalue(), "tickets.csv", "text/csv")
-
-    # Print slip (everyone)
-    orientation = "landscape" if pdf_layout == "Landscape" else "portrait"
-    slip_bytes = make_print_slip_pdf(game, tickets, orientation=orientation)
-    st.download_button("Download Print Slip (PDF)", slip_bytes, "slip.pdf", "application/pdf")
-
-    # Backtest (if data available)
-    bt_df = backtest(game, draws, tickets, last_n=30)
-
-    # Constraints shown in report (adjust as needed)
-    constraints = {
-        "min_hot": 2,
-        "min_cold": 2,
-        "cluster": [2, 4, 5, 37],
-        "parity_target": "≈3 even / 3 odd (Lotto)",
-        "sum_range": "≈80–180 (Lotto demo)",
-    }
-
-    # Full Insights Report (premium)
-    if premium_input.strip() == str(PASSCODE):
-        report_bytes = make_full_report(
-            game=game,
-            tickets=tickets,
-            strategy=strategy,
-            seed=seed,
-            hotcold=hotcold,
-            lookback=LOOKBACK,
-            alpha=ALPHA,
-            constraints=constraints,
-            backtest_df=bt_df,
-            hotline_text=RESPONSIBLE_HELP,
-        )
-        st.success("Premium unlocked: Insights Report available.")
-        st.download_button("Download Insights Report (PDF)", report_bytes, "smartplayai_insights_report.pdf", "application/pdf")
-    else:
-        st.info(f"🔒 Enter your passcode for the full Insights Report. Otherwise, see the brochure: [Sample report]({SAMPLE_REPORT_URL}).")
-
-    # Auto-roll a new seed for next run if chosen
-    if auto_new_seed:
-        st.session_state.seed = random.randint(1, 99999999)
-else:
-    st.info("Set your options in the sidebar and press **Generate**.")
+# META LINE
+st.markdown(
+    f"""
+    <div style="text-align:center;opacity:.85;margin-top:10px;">
+      {st.session_state.game}: Main picks selected ({len(st.session_state.main_selected)}/{cfg['main_picks']})
+      {(" | " + GAMES[st.session_state.game]["special"]["label"] + f" selected ({len(st.session_state.special_selected)}/{cfg['special']['picks']})") if cfg["special"] else ""}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
