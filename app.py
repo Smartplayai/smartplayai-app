@@ -1,5 +1,6 @@
 # app.py
-# SmartPlayAI – Streamlit app with USA-themed “wormhole infinity” header and clean number picker UI
+# SmartPlayAI – Streamlit app with USA-themed “wormhole infinity” header,
+# centered layout, dropdown game chooser, clean number picker UI, AI Suggest, and PDF report.
 
 import streamlit as st
 from datetime import datetime
@@ -12,7 +13,7 @@ import random
 st.set_page_config(page_title="SmartPlayAI", page_icon="🎯", layout="centered")
 
 # -----------------------
-# CONFIG & BACKGROUND HELPERS (not shown to users directly)
+# CONFIG & BACKGROUND HELPERS (not directly shown to users)
 # -----------------------
 GAMES = {
     "Jamaica Lotto":   {"main_range": 38, "main_picks": 6, "special": None},
@@ -21,7 +22,7 @@ GAMES = {
 }
 
 def weighted_sample(range_max: int, k: int):
-    """Slight bias to mid-high values (placeholder for your real model)."""
+    """Demo sampler (placeholder for your production AI model)."""
     mid = range_max / 2
     weights = [0.6 + abs((i + 1) - mid) / range_max for i in range(range_max)]
     total = sum(weights)
@@ -67,7 +68,7 @@ def pdf_report(game_key: str, main_picks, special_picks):
 # SESSION STATE
 # -----------------------
 if "game" not in st.session_state:
-    st.session_state.game = "US Powerball"
+    st.session_state.game = None  # start with nothing chosen
 if "main_selected" not in st.session_state:
     st.session_state.main_selected = set()
 if "special_selected" not in st.session_state:
@@ -76,9 +77,11 @@ if "show_more_main" not in st.session_state:
     st.session_state.show_more_main = False
 if "show_more_special" not in st.session_state:
     st.session_state.show_more_special = False
+if "last_game_choice" not in st.session_state:
+    st.session_state.last_game_choice = None
 
 # -----------------------
-# THEME CSS + STARFIELD + COMPONENT STYLES
+# THEME CSS (centered layout) + STARFIELD
 # -----------------------
 st.markdown(
     """
@@ -94,8 +97,18 @@ st.markdown(
         background: radial-gradient(1400px 900px at 20% -10%, #0b0e15 0%, #04060a 45%, #000 100%) !important;
         color: #fff !important;
       }
+      /* Center the content and control width */
+      .block-container{
+        padding-top:16px;
+        max-width: 880px;
+        margin: 0 auto !important;
+      }
+      /* Align child vertical blocks to the center for a tidy look */
+      [data-testid="stVerticalBlock"]{ align-items:center; }
+
       /* Hide Streamlit menubar/footer for app-like polish */
       #MainMenu, footer {visibility: hidden;}
+
       /* Star field overlay */
       .spa-stars, .spa-stars:before, .spa-stars:after{
         content:""; position: fixed; inset: -10%; pointer-events:none; opacity:.28; z-index: 0;
@@ -119,7 +132,7 @@ st.markdown(
         text-transform: uppercase; box-shadow: 0 10px 40px rgba(0,40,104,.45), 0 0 0 10px rgba(255,255,255,.06);
       }
 
-      /* Number balls (we build them as custom HTML inputs) */
+      /* Number balls */
       .ball-wrap{ display:flex; align-items:center; justify-content:center; }
       .ball {
         appearance: none;
@@ -157,9 +170,6 @@ st.markdown(
       .btn-secondary > button{
         background: rgba(255,255,255,.08); color:#fff; border:1px solid rgba(255,255,255,.15);
       }
-
-      /* Tighten Streamlit container padding slightly */
-      .block-container { padding-top: 16px; }
     </style>
     <div class="spa-stars"></div>
     """,
@@ -252,99 +262,57 @@ st.components.v1.html(
 )
 
 # -----------------------
-# GAME SELECTION (user-facing)
+# GAME SELECTION (dropdown + lazy reveal)
 # -----------------------
-st.markdown("<div style='text-align:center;margin-top:-8px;'><h3>Select Your Game</h3></div>", unsafe_allow_html=True)
-game = st.radio(
-    " ",
-    list(GAMES.keys()),
-    horizontal=True,
-    label_visibility="collapsed",
-    index=list(GAMES.keys()).index(st.session_state.game),
+st.markdown(
+    "<div style='text-align:center;margin-top:-8px;'><h3>Select Your Game</h3></div>",
+    unsafe_allow_html=True
 )
-if game != st.session_state.game:
-    st.session_state.game = game
+
+CHOOSER_LABEL = "— Select a game —"
+game_choice = st.selectbox(
+    "Choose your game",
+    [CHOOSER_LABEL] + list(GAMES.keys()),
+    index=0,
+    label_visibility="collapsed",
+)
+
+# Reset state when switching games or clearing selection
+if game_choice != st.session_state.last_game_choice:
+    st.session_state.last_game_choice = game_choice
     st.session_state.main_selected = set()
     st.session_state.special_selected = set()
     st.session_state.show_more_main = False
     st.session_state.show_more_special = False
 
-cfg = GAMES[st.session_state.game]
+# Only proceed if a real game is chosen
+if game_choice != CHOOSER_LABEL:
+    st.session_state.game = game_choice
+    cfg = GAMES[st.session_state.game]
 
-# -----------------------
-# NUMBER GRID (user-facing)
-# -----------------------
-st.markdown("<div style='text-align:center; margin: 6px 0 8px; font-weight: 800; font-size: 22px;'>Select Your Numbers</div>", unsafe_allow_html=True)
-
-preview = min(28, cfg["main_range"])
-show_count = cfg["main_range"] if st.session_state.show_more_main else preview
-cols_per_row = 8
-rows = (show_count + cols_per_row - 1) // cols_per_row
-
-for r in range(rows):
-    cols = st.columns(cols_per_row, gap="small")
-    for i, c in enumerate(cols):
-        n = r * cols_per_row + i + 1
-        if n > show_count:
-            continue
-        key = f"main_{n}"
-        checked = (n in st.session_state.main_selected)
-        with c:
-            # Render a visually styled ball (HTML input) and a hidden Streamlit checkbox to mirror state
-            st.markdown(
-                f"""
-                <div class="ball-wrap">
-                  <input type="checkbox" id="{key}" {'checked' if checked else ''} class="ball" onclick="this.dispatchEvent(new Event('change', {{bubbles:true}}));">
-                  <label for="{key}" class="ball-label">{n}</label>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            # Hidden mirror checkbox captures state changes for Streamlit
-            mirror = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
-            if mirror and n not in st.session_state.main_selected:
-                # limit to max picks: remove oldest
-                if len(st.session_state.main_selected) >= cfg["main_picks"]:
-                    first = sorted(st.session_state.main_selected)[0]
-                    st.session_state.main_selected.remove(first)
-                    mk = f"main_{first}_mirror"
-                    if mk in st.session_state: st.session_state[mk] = False
-                st.session_state.main_selected.add(n)
-            if not mirror and n in st.session_state.main_selected:
-                st.session_state.main_selected.remove(n)
-
-# Show more / less controls
-cta_cols = st.columns([1,1,1])
-with cta_cols[1]:
-    if cfg["main_range"] > preview:
-        if not st.session_state.show_more_main:
-            if st.button(f"Show {cfg['main_range'] - preview} more", key="main_more", help="Reveal the full number range"):
-                st.session_state.show_more_main = True
-                st.rerun()
-        else:
-            if st.button("Show less", key="main_less"):
-                st.session_state.show_more_main = False
-                st.rerun()
-
-# Special ball section
-if cfg["special"]:
+    # -----------------------
+    # NUMBER GRID (only appears after game chosen)
+    # -----------------------
     st.markdown(
-        f"<div style='text-align:center; margin: 12px 0 6px; font-weight: 800;'>"
-        f"{cfg['special']['label']} (pick {cfg['special']['picks']} of {cfg['special']['range']})</div>",
-        unsafe_allow_html=True,
+        "<div style='text-align:center; margin: 6px 0 8px; font-weight: 800; font-size: 22px;'>Select Your Numbers</div>",
+        unsafe_allow_html=True
     )
-    sp_preview = min(28, cfg["special"]["range"])
-    sp_show_count = cfg["special"]["range"] if st.session_state.show_more_special else sp_preview
-    rows = (sp_show_count + cols_per_row - 1) // cols_per_row
+
+    preview = min(28, cfg["main_range"])
+    show_count = cfg["main_range"] if st.session_state.show_more_main else preview
+    cols_per_row = 8
+    rows = (show_count + cols_per_row - 1) // cols_per_row
+
     for r in range(rows):
         cols = st.columns(cols_per_row, gap="small")
         for i, c in enumerate(cols):
             n = r * cols_per_row + i + 1
-            if n > sp_show_count:
+            if n > show_count: 
                 continue
-            key = f"special_{n}"
-            checked = (n in st.session_state.special_selected)
+            key = f"main_{n}"
+            checked = (n in st.session_state.main_selected)
             with c:
+                # Render a visually styled ball (HTML input) and a hidden Streamlit checkbox to mirror state
                 st.markdown(
                     f"""
                     <div class="ball-wrap">
@@ -354,96 +322,154 @@ if cfg["special"]:
                     """,
                     unsafe_allow_html=True,
                 )
-                # mirror to state (limit to exactly cfg['special']['picks'])
+                # Hidden mirror checkbox captures state changes for Streamlit
                 mirror = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
-                if mirror and n not in st.session_state.special_selected:
-                    if len(st.session_state.special_selected) >= cfg["special"]["picks"]:
-                        first = next(iter(st.session_state.special_selected))
-                        st.session_state.special_selected.remove(first)
-                        sk = f"special_{first}_mirror"
-                        if sk in st.session_state: st.session_state[sk] = False
-                    st.session_state.special_selected.add(n)
-                if not mirror and n in st.session_state.special_selected:
-                    st.session_state.special_selected.remove(n)
+                if mirror and n not in st.session_state.main_selected:
+                    # enforce max picks: remove earliest (lowest) if already full
+                    if len(st.session_state.main_selected) >= cfg["main_picks"]:
+                        first = sorted(st.session_state.main_selected)[0]
+                        st.session_state.main_selected.remove(first)
+                        mk = f"main_{first}_mirror"
+                        if mk in st.session_state: 
+                            st.session_state[mk] = False
+                    st.session_state.main_selected.add(n)
+                if not mirror and n in st.session_state.main_selected:
+                    st.session_state.main_selected.remove(n)
 
+    # Show more / less controls
+    cta_cols = st.columns([1,1,1])
     with cta_cols[1]:
-        if cfg["special"]["range"] > sp_preview:
-            if not st.session_state.show_more_special:
-                if st.button(f"Show {cfg['special']['range'] - sp_preview} more", key="sp_more"):
-                    st.session_state.show_more_special = True
+        if cfg["main_range"] > preview:
+            if not st.session_state.show_more_main:
+                if st.button(f"Show {cfg['main_range'] - preview} more", key="main_more", help="Reveal the full number range"):
+                    st.session_state.show_more_main = True
                     st.rerun()
             else:
-                if st.button("Show less", key="sp_less"):
-                    st.session_state.show_more_special = False
+                if st.button("Show less", key="main_less"):
+                    st.session_state.show_more_main = False
                     st.rerun()
 
-# -----------------------
-# ACTIONS (user-facing)
-# -----------------------
-a1, a2, a3 = st.columns(3)
+    # Special ball section (only for games that have it)
+    if cfg["special"]:
+        st.markdown(
+            f"<div style='text-align:center; margin: 12px 0 6px; font-weight: 800;'>"
+            f"{cfg['special']['label']} (pick {cfg['special']['picks']} of {cfg['special']['range']})</div>",
+            unsafe_allow_html=True,
+        )
+        sp_preview = min(28, cfg["special"]["range"])
+        sp_show_count = cfg["special"]["range"] if st.session_state.show_more_special else sp_preview
+        rows = (sp_show_count + cols_per_row - 1) // cols_per_row
+        for r in range(rows):
+            cols = st.columns(cols_per_row, gap="small")
+            for i, c in enumerate(cols):
+                n = r * cols_per_row + i + 1
+                if n > sp_show_count: 
+                    continue
+                key = f"special_{n}"
+                checked = (n in st.session_state.special_selected)
+                with c:
+                    st.markdown(
+                        f"""
+                        <div class="ball-wrap">
+                          <input type="checkbox" id="{key}" {'checked' if checked else ''} class="ball" onclick="this.dispatchEvent(new Event('change', {{bubbles:true}}));">
+                          <label for="{key}" class="ball-label">{n}</label>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    # Mirror to state (limit to exactly cfg['special']['picks'])
+                    mirror = st.checkbox("", value=checked, key=f"{key}_mirror", label_visibility="collapsed")
+                    if mirror and n not in st.session_state.special_selected:
+                        if len(st.session_state.special_selected) >= cfg["special"]["picks"]:
+                            first = next(iter(st.session_state.special_selected))
+                            st.session_state.special_selected.remove(first)
+                            sk = f"special_{first}_mirror"
+                            if sk in st.session_state: 
+                                st.session_state[sk] = False
+                        st.session_state.special_selected.add(n)
+                    if not mirror and n in st.session_state.special_selected:
+                        st.session_state.special_selected.remove(n)
 
-with a1:
-    if st.button("AI Suggest", key="ai_suggest", help="Let SmartPlayAI choose a set"):
-        main, special = suggest_for_game(st.session_state.game)
+        with cta_cols[1]:
+            if cfg["special"]["range"] > sp_preview:
+                if not st.session_state.show_more_special:
+                    if st.button(f"Show {cfg['special']['range'] - sp_preview} more", key="sp_more"):
+                        st.session_state.show_more_special = True
+                        st.rerun()
+                else:
+                    if st.button("Show less", key="sp_less"):
+                        st.session_state.show_more_special = False
+                        st.rerun()
 
-        # reset mirrors
-        for n in range(1, cfg["main_range"] + 1):
-            mk = f"main_{n}_mirror"
-            if mk in st.session_state:
-                st.session_state[mk] = False
-        st.session_state.main_selected = set(main)
-        for n in main:
-            st.session_state[f"main_{n}_mirror"] = True
+    # -----------------------
+    # ACTIONS (appear only after game chosen)
+    # -----------------------
+    a1, a2, a3 = st.columns(3)
 
-        if cfg["special"]:
-            for n in range(1, cfg["special"]["range"] + 1):
-                sk = f"special_{n}_mirror"
-                if sk in st.session_state:
-                    st.session_state[sk] = False
-            st.session_state.special_selected = set(special)
-            for n in special:
-                st.session_state[f"special_{n}_mirror"] = True
+    with a1:
+        if st.button("AI Suggest", key="ai_suggest", help="Let SmartPlayAI choose a set"):
+            main, special = suggest_for_game(st.session_state.game)
 
-        st.success(f"AI Suggested {main}" + (f" | {cfg['special']['label']}: {special}" if cfg["special"] else ""))
-        st.rerun()
+            # reset mirrors and apply picks
+            for n in range(1, cfg["main_range"] + 1):
+                mk = f"main_{n}_mirror"
+                if mk in st.session_state: 
+                    st.session_state[mk] = False
+            st.session_state.main_selected = set(main)
+            for n in main:
+                st.session_state[f"main_{n}_mirror"] = True
 
-with a2:
-    if st.button("Submit", key="submit", help="Validate your selection"):
-        errors = []
-        if len(st.session_state.main_selected) != cfg["main_picks"]:
-            errors.append(f"Pick exactly {cfg['main_picks']} main numbers.")
-        if cfg["special"] and len(st.session_state.special_selected) != cfg["special"]["picks"]:
-            errors.append(f"Pick exactly {cfg['special']['picks']} {cfg['special']['label']}.")
-        if errors:
-            st.error(" ".join(errors))
-        else:
-            st.success("Selection looks good! You can generate your PDF report below.")
+            if cfg["special"]:
+                for n in range(1, cfg["special"]["range"] + 1):
+                    sk = f"special_{n}_mirror"
+                    if sk in st.session_state:
+                        st.session_state[sk] = False
+                st.session_state.special_selected = set(special)
+                for n in special:
+                    st.session_state[f"special_{n}_mirror"] = True
 
-with a3:
-    ready = (len(st.session_state.main_selected) == cfg["main_picks"]) and (
-        (not cfg["special"]) or (len(st.session_state.special_selected) == cfg["special"]["picks"])
+            st.success(f"AI Suggested {main}" + (f" | {cfg['special']['label']}: {special}" if cfg["special"] else ""))
+            st.rerun()
+
+    with a2:
+        if st.button("Submit", key="submit", help="Validate your selection"):
+            errors = []
+            if len(st.session_state.main_selected) != cfg["main_picks"]:
+                errors.append(f"Pick exactly {cfg['main_picks']} main numbers.")
+            if cfg["special"] and len(st.session_state.special_selected) != cfg["special"]["picks"]:
+                errors.append(f"Pick exactly {cfg['special']['picks']} {cfg['special']['label']}.")
+            if errors:
+                st.error(" ".join(errors))
+            else:
+                st.success("Selection looks good! You can generate your PDF report below.")
+
+    with a3:
+        ready = (len(st.session_state.main_selected) == cfg["main_picks"]) and (
+            (not cfg["special"]) or (len(st.session_state.special_selected) == cfg["special"]["picks"])
+        )
+        if st.button("Generate PDF", key="pdf", help="Download your selection as a PDF", disabled=not ready):
+            pdf_bytes = pdf_report(
+                st.session_state.game,
+                sorted(st.session_state.main_selected),
+                sorted(st.session_state.special_selected),
+            )
+            st.download_button(
+                "Download Report",
+                data=pdf_bytes,
+                file_name="smartplayai_report.pdf",
+                mime="application/pdf",
+            )
+
+    # Status line
+    st.markdown(
+        f"""
+        <div style="text-align:center;opacity:.85;margin-top:10px;">
+          {st.session_state.game}: Main picks selected ({len(st.session_state.main_selected)}/{cfg['main_picks']})
+          {(" | " + GAMES[st.session_state.game]["special"]["label"] + f" selected ({len(st.session_state.special_selected)}/{cfg['special']['picks']})") if cfg["special"] else ""}
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    if st.button("Generate PDF", key="pdf", help="Download your selection as a PDF", disabled=not ready):
-        pdf_bytes = pdf_report(
-            st.session_state.game,
-            sorted(st.session_state.main_selected),
-            sorted(st.session_state.special_selected),
-        )
-        st.download_button(
-            "Download Report",
-            data=pdf_bytes,
-            file_name="smartplayai_report.pdf",
-            mime="application/pdf",
-        )
-
-# META LINE
-st.markdown(
-    f"""
-    <div style="text-align:center;opacity:.85;margin-top:10px;">
-      {st.session_state.game}: Main picks selected ({len(st.session_state.main_selected)}/{cfg['main_picks']})
-      {(" | " + GAMES[st.session_state.game]["special"]["label"] + f" selected ({len(st.session_state.special_selected)}/{cfg['special']['picks']})") if cfg["special"] else ""}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
+else:
+    # Nothing chosen yet: only show the header + tip
+    st.info("Select a game from the dropdown to reveal the number grid and actions.")
