@@ -303,30 +303,21 @@ def can_run(log: list, limit: int, window_s: int = 24*3600) -> bool:
     return True
 
 # -------------------------- Number pickers ------------------------
-def enforce_limit(prefix: str, selected_set: set, max_picks: int, attempted: int):
-    if len(selected_set) > max_picks:
-        if attempted is not None and attempted in selected_set:
-            selected_set.remove(attempted)
-            st.session_state[f"{prefix}_{attempted}_mirror"] = False
-        st.toast(f"Limit reached: pick at most {max_picks}.", icon="⚠️")
+def draw_row(prefix, total, selected_set, max_picks):
+    # Safe & simple (no internal Streamlit APIs). Streamlit wraps responsively.
+    cols_per_row = 8
+    rows = (total + cols_per_row - 1) // cols_per_row
 
-if not ss.get("game"):
-    st.info("Select a game from the dropdown to reveal the number grid and actions.")
-else:
-    cfg = GAMES[ss.game]
-    st.markdown("<div style='text-align:center;font-weight:800;font-size:22px;margin:6px 0 8px'>Select Your Numbers</div>", unsafe_allow_html=True)
-
-    def draw_row(prefix, total, selected_set, max_picks):
-        cols_per_row = 8 if st.runtime.scriptrunner.script_run_context.ScriptRunContext().query_params is None else 8
-        rows = (total + cols_per_row - 1) // cols_per_row
-        for r in range(rows):
-            cols = st.columns(cols_per_row, gap="small")
-            for i, c in enumerate(cols):
-                n = r * cols_per_row + i + 1
-                if n > total: continue
-                checked = (n in selected_set); attempted = None
-                with c:
-                    st.markdown(
+    for r in range(rows):
+        cols = st.columns(cols_per_row, gap="small")
+        for i, c in enumerate(cols):
+            n = r * cols_per_row + i + 1
+            if n > total:
+                continue
+            checked = (n in selected_set)
+            attempted = None
+            with c:
+                st.markdown(
 f"""
 <div class="ball-slot">
   <input id="{prefix}_{n}" class="ball-check" type="checkbox" {'checked' if checked else ''} 
@@ -334,11 +325,27 @@ f"""
   <label class="ball-label" for="{prefix}_{n}">{n}</label>
 </div>
 """, unsafe_allow_html=True)
-                    mirror = st.checkbox("", value=checked, key=f"{prefix}_{n}_mirror", label_visibility="collapsed")
-                    if mirror and n not in selected_set:
-                        selected_set.add(n); attempted = n; enforce_limit(prefix, selected_set, max_picks, attempted)
-                    if not mirror and n in selected_set:
-                        selected_set.remove(n)
+
+                # Mirror state to Streamlit (hidden checkbox)
+                mirror = st.checkbox("", value=checked, key=f"{prefix}_{n}_mirror", label_visibility="collapsed")
+                if mirror and n not in selected_set:
+                    selected_set.add(n)
+                    attempted = n
+                    # enforce hard limit
+                    if len(selected_set) > max_picks:
+                        selected_set.remove(attempted)
+                        st.session_state[f"{prefix}_{attempted}_mirror"] = False
+                        st.toast(f"Limit reached: pick at most {max_picks}.", icon="⚠️")
+
+                if not mirror and n in selected_set:
+                    selected_set.remove(n)
+
+# ------------------------------ Main UI ---------------------------
+if not ss.get("game"):
+    st.info("Select a game from the dropdown to reveal the number grid and actions.")
+else:
+    cfg = GAMES[ss.game]
+    st.markdown("<div style='text-align:center;font-weight:800;font-size:22px;margin:6px 0 8px'>Select Your Numbers</div>", unsafe_allow_html=True)
 
     # main balls
     draw_row("main", cfg["main_range"], ss.main_selected, cfg["main_picks"])
