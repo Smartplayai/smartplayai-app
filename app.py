@@ -1,6 +1,7 @@
 # SmartPlayAI — Premium, polished Streamlit app
 # UX: onboarding, age-gate, strict limits, freemium, Premium Insights PDF,
-# Unicode-safe PDFs, health score, live next-draw countdown, compliance footer.
+# Unicode-safe PDFs, health score, live next-draw countdown, sidebar mini-calendar + ICS,
+# compliance footer with policy links.
 
 import streamlit as st
 from fpdf import FPDF
@@ -10,17 +11,23 @@ from typing import List, Dict
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None  # fallback if unavailable
+    ZoneInfo = None  # fallback if not available
 
 st.set_page_config(page_title="SmartPlayAI", page_icon="🎯", layout="centered")
 
 # ----------------------------- Config -----------------------------
 GAMES = {
-    "Jamaica Lotto":   {"main_range": 38, "main_picks": 6, "special": None},
-    "Caribbean Super Lotto": {"main_range": 35, "main_picks": 5,
-                        "special": {"range": 10, "picks": 1, "label": "Super Ball"}},
-    "US Powerball":    {"main_range": 69, "main_picks": 5,
-                        "special": {"range": 26, "picks": 1, "label": "Powerball"}},
+    "Jamaica Lotto": {
+        "main_range": 38, "main_picks": 6, "special": None
+    },
+    "Caribbean Super Lotto": {
+        "main_range": 35, "main_picks": 5,
+        "special": {"range": 10, "picks": 1, "label": "Super Ball"}
+    },
+    "US Powerball": {
+        "main_range": 69, "main_picks": 5,
+        "special": {"range": 26, "picks": 1, "label": "Powerball"}
+    },
 }
 
 # Secrets (safe defaults provided)
@@ -41,11 +48,12 @@ def wdays(val, default):
         return [d for d in out if 0<=d<=6] or default
     except: return default
 
+# Mon=0..Sun=6
 LOTTO_WD     = wdays(st.secrets.get("LOTTO_DRAW_WEEKDAYS", "2,5"), [2,5])            # Wed, Sat
 SUPER_WD     = wdays(st.secrets.get("SUPER_DRAW_WEEKDAYS", "1,4"), [1,4])            # Tue, Fri
 POWERBALL_WD = wdays(st.secrets.get("POWERBALL_DRAW_WEEKDAYS", "0,2,5"), [0,2,5])    # Mon, Wed, Sat
 
-LOTTO_TIME     = st.secrets.get("LOTTO_DRAW_TIME", "20:30")       # local time
+LOTTO_TIME     = st.secrets.get("LOTTO_DRAW_TIME", "20:30")       # local time (HH:MM)
 SUPER_TIME     = st.secrets.get("SUPER_DRAW_TIME", "20:30")
 POWERBALL_TIME = st.secrets.get("POWERBALL_DRAW_TIME", "22:59")
 
@@ -62,7 +70,6 @@ def next_draw_datetime(game: str):
     wds, tstr = get_weekdays_and_time(game)
     hh, mm = [int(x) for x in tstr.split(":")]
     now = datetime.now(TZ) if TZ else datetime.now()
-    # find the next date among configured weekdays
     candidates = []
     for wd in wds:
         delta = (wd - now.weekday()) % 7
@@ -71,6 +78,55 @@ def next_draw_datetime(game: str):
             dt += timedelta(days=7)
         candidates.append(dt)
     return min(candidates) if candidates else (now + timedelta(days=1))
+
+# ---------- Draw calendars & ICS helpers ----------
+def get_next_k_draws(game: str, k: int = 4):
+    """Return the next k draw datetimes for a given game."""
+    wds, tstr = get_weekdays_and_time(game)
+    hh, mm = [int(x) for x in tstr.split(":")]
+    now = datetime.now(TZ) if TZ else datetime.now()
+    out = []
+    d = now
+    while len(out) < k:
+        if d.weekday() in wds:
+            dt = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if dt >= now:
+                out.append(dt)
+        d += timedelta(days=1)
+    return out
+
+def _ics_dt(dt: datetime) -> str:
+    # Floating local time format (calendar apps will treat as local time)
+    return dt.strftime("%Y%m%dT%H%M%S")
+
+def build_ics_for_all(next_n: int = 8) -> bytes:
+    """Build a simple multi-event ICS file for all games (next_n events each)."""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//SmartPlayAI//Draw Calendar//EN"
+    ]
+    nowstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    for game in GAMES.keys():
+        draws = get_next_k_draws(game, k=min(next_n, 10))
+        for dt in draws:
+            dtstart = _ics_dt(dt)
+            dtend   = _ics_dt(dt + timedelta(minutes=30))
+            uid = hashlib.sha1(f"{game}-{dt.isoformat()}".encode()).hexdigest()[:16]
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{uid}@smartplay.ai",
+                f"DTSTAMP:{nowstamp}",
+                f"SUMMARY:{game} Draw",
+                f"DESCRIPTION:Next scheduled draw for {game} (SmartPlayAI).",
+                f"DTSTART:{dtstart}",
+                f"DTEND:{dtend}",
+                "END:VEVENT"
+            ]
+
+    lines.append("END:VCALENDAR")
+    return ("\r\n".join(lines)).encode("utf-8")
 
 # -------------------------- Session State -------------------------
 ss = st.session_state
@@ -270,8 +326,7 @@ def build_pdf(game, main, special, meta: dict):
     pdf.set_font("Helvetica", size=10)
     pdf.set_text_color(120,120,120)
     pdf.multi_cell(0, 6, f"Analytics only • No guaranteed outcomes • 18+ • {RESP_HELP}")
-    # Unicode-safe bytes
-    return pdf.output(dest="S").encode("latin1", errors="ignore")
+    return pdf.output(dest="S").encode("latin1", errors="ignore")  # Unicode-safe
 
 def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, meta: dict):
     game = game_key
@@ -316,8 +371,7 @@ def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, 
     pdf.set_font("Helvetica", size=11)
     pdf.cell(0, 7, f"Your current main selection: {', '.join(map(str, main))}  →  Health Score: {score}/100", ln=1)
 
-    # Unicode-safe bytes
-    return pdf.output(dest="S").encode("latin1", errors="ignore")
+    return pdf.output(dest="S").encode("latin1", errors="ignore")  # Unicode-safe
 
 # ------------------------- Freemium rate limit --------------------
 def can_run(log: list, limit: int, window_s: int = 24*3600) -> bool:
@@ -418,7 +472,6 @@ else:
     with cols[1]:
         if st.button("Generate Insights Report (Premium)"):
             if str(pass_in).strip() == str(PREMIUM_PASS):
-                # You can separate premium limits if desired; currently effectively unlimited vs free.
                 seed = random.randint(1, 10_000_000)
                 params = {"game": ss.game, "mode": "insights", "main": sorted(list(ss.main_selected))}
                 vcode = verification_code(ss.game, seed, params)
@@ -435,11 +488,10 @@ else:
         if not selected_game:
             return
         target = next_draw_datetime(selected_game)
-        # tick every second
         try:
             st.autorefresh(interval=1000, key=f"countdown_{selected_game.replace(' ', '_')}")
         except Exception:
-            pass  # older Streamlit versions
+            pass  # for older Streamlit versions
 
         now_t = datetime.now(TZ) if TZ else datetime.now()
         remaining = target - now_t
@@ -472,6 +524,24 @@ else:
 
     st.markdown("---")
     render_countdown(ss.game)
+
+# ---------- Sidebar mini-calendar & ICS download ----------
+with st.sidebar:
+    st.markdown("## 📅 Upcoming Draws")
+    for g in GAMES.keys():
+        st.markdown(f"**{g}**")
+        for dt in get_next_k_draws(g, k=4):
+            st.caption(dt.strftime("%a, %b %d • %I:%M %p"))
+        st.markdown("---")
+
+    ics_bytes = build_ics_for_all(next_n=8)
+    st.download_button(
+        "⬇️ Add to Calendar (.ics)",
+        data=ics_bytes,
+        file_name="smartplayai_draws.ics",
+        mime="text/calendar",
+        help="Import into Apple/Google/Outlook to see upcoming draws."
+    )
 
 # ----------------------------- Footer -----------------------------
 st.markdown("""
