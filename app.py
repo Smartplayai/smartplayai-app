@@ -1,31 +1,39 @@
-# SmartPlayAI — First-class UX: onboarding, age-gate, strict limits, freemium,
-# Premium Insights (Hot/Warm/Cold), Ticket Health Score, Verification Code, caching.
+# SmartPlayAI — Premium, polished Streamlit app
+# UX: onboarding, age-gate, strict limits, freemium, Premium Insights PDF,
+# Unicode-safe PDFs, health score, live next-draw countdown, compliance footer.
 
 import streamlit as st
 from fpdf import FPDF
 from datetime import datetime, date, timedelta
 import random, math, json, hashlib
 from typing import List, Dict
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None  # fallback if unavailable
 
 st.set_page_config(page_title="SmartPlayAI", page_icon="🎯", layout="centered")
 
 # ----------------------------- Config -----------------------------
 GAMES = {
     "Jamaica Lotto":   {"main_range": 38, "main_picks": 6, "special": None},
-    "Caribbean Super": {"main_range": 35, "main_picks": 5,
+    "Caribbean Super Lotto": {"main_range": 35, "main_picks": 5,
                         "special": {"range": 10, "picks": 1, "label": "Super Ball"}},
     "US Powerball":    {"main_range": 69, "main_picks": 5,
                         "special": {"range": 26, "picks": 1, "label": "Powerball"}},
 }
 
-# Defaults; can override via Streamlit Secrets
+# Secrets (safe defaults provided)
 PREMIUM_PASS     = st.secrets.get("PASSCODE", "premium2025")
 RUNS_PER_DAY     = int(st.secrets.get("RUNS_PER_DAY", 20))  # free runs/day/session
 RESP_HELP        = st.secrets.get("RESPONSIBLE_HELP", "If gambling is affecting you, seek local support resources.")
 BRAND_URL        = st.secrets.get("BRAND_URL", "https://smartplayai.example.com")
 SHOW_ONBOARDING  = bool(st.secrets.get("SHOW_ONBOARDING", True))
 
-# Next draws (simple weekly schedule; override in Secrets w/ Mon=0..Sun=6)
+# Timezone & draw schedules (override in Secrets)
+APP_TZ = st.secrets.get("TIMEZONE", "America/Jamaica")
+TZ = ZoneInfo(APP_TZ) if ZoneInfo else None
+
 def wdays(val, default):
     if not val: return default
     try:
@@ -33,17 +41,36 @@ def wdays(val, default):
         return [d for d in out if 0<=d<=6] or default
     except: return default
 
-LOTTO_WD     = wdays(st.secrets.get("LOTTO_DRAW_WEEKDAYS", "2,5"), [2,5])       # Wed, Sat
-SUPER_WD     = wdays(st.secrets.get("SUPER_DRAW_WEEKDAYS", "1,4"), [1,4])       # Tue, Fri
-POWERBALL_WD = wdays(st.secrets.get("POWERBALL_DRAW_WEEKDAYS", "0,2,5"), [0,2,5])  # Mon, Wed, Sat
+LOTTO_WD     = wdays(st.secrets.get("LOTTO_DRAW_WEEKDAYS", "2,5"), [2,5])            # Wed, Sat
+SUPER_WD     = wdays(st.secrets.get("SUPER_DRAW_WEEKDAYS", "1,4"), [1,4])            # Tue, Fri
+POWERBALL_WD = wdays(st.secrets.get("POWERBALL_DRAW_WEEKDAYS", "0,2,5"), [0,2,5])    # Mon, Wed, Sat
 
-def next_draw_dates(weekdays: List[int], start: date, k: int = 2):
-    out=[]
-    d=start
-    while len(out)<k:
-        if d.weekday() in weekdays: out.append(d)
-        d+=timedelta(days=1)
-    return out
+LOTTO_TIME     = st.secrets.get("LOTTO_DRAW_TIME", "20:30")       # local time
+SUPER_TIME     = st.secrets.get("SUPER_DRAW_TIME", "20:30")
+POWERBALL_TIME = st.secrets.get("POWERBALL_DRAW_TIME", "22:59")
+
+def get_weekdays_and_time(game: str):
+    if game == "Jamaica Lotto":
+        return LOTTO_WD, LOTTO_TIME
+    if game == "Caribbean Super Lotto":
+        return SUPER_WD, SUPER_TIME
+    if game == "US Powerball":
+        return POWERBALL_WD, POWERBALL_TIME
+    return [2,5], "20:30"
+
+def next_draw_datetime(game: str):
+    wds, tstr = get_weekdays_and_time(game)
+    hh, mm = [int(x) for x in tstr.split(":")]
+    now = datetime.now(TZ) if TZ else datetime.now()
+    # find the next date among configured weekdays
+    candidates = []
+    for wd in wds:
+        delta = (wd - now.weekday()) % 7
+        dt = (now + timedelta(days=delta)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if dt <= now:
+            dt += timedelta(days=7)
+        candidates.append(dt)
+    return min(candidates) if candidates else (now + timedelta(days=1))
 
 # -------------------------- Session State -------------------------
 ss = st.session_state
@@ -58,7 +85,7 @@ ss.setdefault("special_selected", set())
 # ------------------------------ Styles ----------------------------
 st.markdown("""
 <style>
-:root{ --red:#d81324; --ring:#5a0a10; --white:#fff; --ease:cubic-bezier(.2,.8,.2,1); }
+:root{ --red:#ff2a4f; --ring:#5a0a10; --white:#fff; --ease:cubic-bezier(.2,.8,.2,1); }
 .stApp, .main, .block-container{
   background: radial-gradient(1400px 900px at 20% -10%, #0b0e15 0%, #04060a 45%, #000 100%) !important;
   color:#fff;
@@ -72,7 +99,7 @@ svg.infinity { filter: drop-shadow(0 10px 24px rgba(255,255,255,.14)); }
   display:grid; place-items:center; width:70px; height:70px; border-radius:50%;
   font: 900 22px/1 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: var(--white);
-  background: radial-gradient(circle at 30% 28%, #ff6b6b 0%, #e3162d 55%, #bf0d1f 100%);
+  background: radial-gradient(circle at 30% 28%, #ff6b6b 0%, var(--red) 55%, #b20b1c 100%);
   border: 4px solid var(--ring);
   box-shadow: 0 6px 14px rgba(0,0,0,.55), inset 0 6px 12px rgba(255,255,255,.23);
   cursor:pointer;
@@ -92,7 +119,17 @@ svg.infinity { filter: drop-shadow(0 10px 24px rgba(255,255,255,.14)); }
 }
 div[data-testid="stCheckbox"]{ height:0!important; overflow:hidden!important; margin:0!important; padding:0!important; visibility:hidden!important; }
 @media (prefers-reduced-motion: reduce){ .ball-label, .ball-check:checked + .ball-label{ transition:none !important; animation:none !important; } }
-a.brand { color:#ff2a4f; text-decoration:none; }
+a.brand { color:var(--red); text-decoration:none; }
+.stButton>button { background-color: var(--red); color:#fff; border-radius:10px; font-weight:800; border:0; }
+.timer-pill{
+  display:inline-flex; gap:10px; align-items:center;
+  padding:10px 14px; border:1px solid rgba(255,255,255,.18);
+  border-radius:999px; background:rgba(255,255,255,.06);
+  backdrop-filter: blur(6px); color:#fff; font-weight:700;
+}
+.timer-seg{ padding:6px 10px; border-radius:10px;
+  background:rgba(0,0,0,.35); min-width:64px; text-align:center; }
+.timer-lab{ font-weight:600; opacity:.85; margin-left:8px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -132,7 +169,7 @@ if SHOW_ONBOARDING and not ss.onboarding_dismissed:
     with st.expander("✨ Quick Start (60 sec) — How to use SmartPlayAI", expanded=True):
         st.markdown("""
         1. **Choose your game** below.  
-        2. **Tap numbers** (we limit picks to the game's rules).  
+        2. **Tap numbers** (we strictly limit picks to the game's rules).  
         3. Click **AI Suggest** to auto-pick within limits.  
         4. Generate a **PDF Report** (free) or **Insights** (premium) with hot/warm/cold.  
         """)
@@ -143,19 +180,6 @@ st.checkbox("I am 18+ and I agree to use SmartPlayAI for entertainment/analysis.
 if not ss.age_confirmed:
     st.warning("Please confirm you are 18+ to continue.")
     st.stop()
-
-# --------------------------- Next Draws ---------------------------
-def draw_badge(label, weekdays):
-    today = date.today()
-    nxt = next_draw_dates(weekdays, today, k=1)[0]
-    days_left = (nxt - today).days
-    st.markdown(f"**{label}** — Next draw: **{nxt.isoformat()}**  ·  ⏳ {days_left} day(s)")
-
-cols = st.columns(3)
-with cols[0]: draw_badge("Jamaica Lotto", LOTTO_WD)
-with cols[1]: draw_badge("Caribbean Super Lotto", SUPER_WD)
-with cols[2]: draw_badge("US Powerball", POWERBALL_WD)
-st.markdown("---")
 
 # ---------------------- Game select (auto reset) ------------------
 CHOOSER = "— Select a game —"
@@ -211,6 +235,7 @@ def compute_trends(game_key: str, draws: int = 120, alpha: float = 0.97) -> Dict
     return {"hot": hot, "warm": warm, "cold": cold, "alpha": alpha, "draws": draws}
 
 def ticket_health(nums: List[int], hot: List[int], cold: List[int]) -> int:
+    if not nums: return 0
     hot_count = sum(1 for n in nums if n in hot)
     cold_count = sum(1 for n in nums if n in cold)
     even = sum(1 for n in nums if n % 2 == 0)
@@ -245,10 +270,11 @@ def build_pdf(game, main, special, meta: dict):
     pdf.set_font("Helvetica", size=10)
     pdf.set_text_color(120,120,120)
     pdf.multi_cell(0, 6, f"Analytics only • No guaranteed outcomes • 18+ • {RESP_HELP}")
-    return pdf.output(dest="S").encode("latin1")
+    # Unicode-safe bytes
+    return pdf.output(dest="S").encode("latin1", errors="ignore")
 
 def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, meta: dict):
-    game = game_key; cfg = GAMES[game]
+    game = game_key
     hot, warm, cold = trends["hot"], trends["warm"], trends["cold"]
     alpha, draws = trends["alpha"], trends["draws"]
 
@@ -261,7 +287,7 @@ def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, 
     pdf.set_font("Helvetica", "B", 20)
     pdf.cell(0, 10, "SmartPlayAI — Insights Report", ln=1, align="C")
     pdf.set_font("Helvetica", size=11)
-    pdf.cell(0, 8, f"Game: {game} • Computation window: last {draws} simulated draws • EWMA α = {alpha} • Seed={seed} • Code={meta.get('vcode','')}", ln=1)
+    pdf.cell(0, 8, f"Game: {game} • Window: last {draws} simulated draws • EWMA alpha={alpha} • Seed={seed} • Code={meta.get('vcode','')}", ln=1)
 
     def section(title, values):
         pdf.ln(3); pdf.set_font("Helvetica", "B", 13); pdf.cell(0, 8, title, ln=1)
@@ -269,9 +295,9 @@ def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, 
         for row in chunk(values, 18):
             pdf.cell(0, 7, ", ".join(f"{v:02d}" for v in row), ln=1)
 
-    section("🔥 Hot (recently frequent)", hot)
-    section("🌤️ Warm (mid cohort)", warm)
-    section("🧊 Cold / Overdue (rare lately)", cold)
+    section("Hot (recently frequent)", hot)
+    section("Warm (mid cohort)", warm)
+    section("Cold / Overdue (rare lately)", cold)
 
     # Page 2 — methodology & ticket health
     pdf.add_page()
@@ -280,8 +306,8 @@ def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, 
     pdf.set_font("Helvetica", size=11)
     pdf.multi_cell(0, 7,
         "- We estimate recency-weighted frequencies using an exponentially weighted moving average (EWMA).\n"
-        f"- Parameters used: draws={draws}, alpha={alpha}. Hot/Cold are top/bottom ~18% by score; middle is Warm.\n"
-        "- Replace this simulator with real historical draws for production-grade insights.\n"
+        f"- Parameters: draws={draws}, alpha={alpha}. Hot/Cold = top/bottom ~18% by score; middle = Warm.\n"
+        "- Replace simulator with real historical draws to upgrade insight quality.\n"
         "- This report is for entertainment/analysis only and does not guarantee outcomes. 18+ Play responsibly."
     )
     # Ticket health
@@ -290,7 +316,8 @@ def build_insights_pdf(game_key: str, trends: dict, main: List[int], seed: int, 
     pdf.set_font("Helvetica", size=11)
     pdf.cell(0, 7, f"Your current main selection: {', '.join(map(str, main))}  →  Health Score: {score}/100", ln=1)
 
-    return pdf.output(dest="S").encode("latin1")
+    # Unicode-safe bytes
+    return pdf.output(dest="S").encode("latin1", errors="ignore")
 
 # ------------------------- Freemium rate limit --------------------
 def can_run(log: list, limit: int, window_s: int = 24*3600) -> bool:
@@ -304,16 +331,14 @@ def can_run(log: list, limit: int, window_s: int = 24*3600) -> bool:
 
 # -------------------------- Number pickers ------------------------
 def draw_row(prefix, total, selected_set, max_picks):
-    # Safe & simple (no internal Streamlit APIs). Streamlit wraps responsively.
+    # Safe & simple; Streamlit wraps responsively.
     cols_per_row = 8
     rows = (total + cols_per_row - 1) // cols_per_row
-
     for r in range(rows):
         cols = st.columns(cols_per_row, gap="small")
         for i, c in enumerate(cols):
             n = r * cols_per_row + i + 1
-            if n > total:
-                continue
+            if n > total: continue
             checked = (n in selected_set)
             attempted = None
             with c:
@@ -325,18 +350,13 @@ f"""
   <label class="ball-label" for="{prefix}_{n}">{n}</label>
 </div>
 """, unsafe_allow_html=True)
-
-                # Mirror state to Streamlit (hidden checkbox)
                 mirror = st.checkbox("", value=checked, key=f"{prefix}_{n}_mirror", label_visibility="collapsed")
                 if mirror and n not in selected_set:
-                    selected_set.add(n)
-                    attempted = n
-                    # enforce hard limit
+                    selected_set.add(n); attempted = n
                     if len(selected_set) > max_picks:
                         selected_set.remove(attempted)
                         st.session_state[f"{prefix}_{attempted}_mirror"] = False
                         st.toast(f"Limit reached: pick at most {max_picks}.", icon="⚠️")
-
                 if not mirror and n in selected_set:
                     selected_set.remove(n)
 
@@ -347,9 +367,7 @@ else:
     cfg = GAMES[ss.game]
     st.markdown("<div style='text-align:center;font-weight:800;font-size:22px;margin:6px 0 8px'>Select Your Numbers</div>", unsafe_allow_html=True)
 
-    # main balls
     draw_row("main", cfg["main_range"], ss.main_selected, cfg["main_picks"])
-    # special balls (if any)
     if cfg["special"]:
         st.markdown(
             f"<div style='text-align:center;margin:12px 0 6px;font-weight:800'>{cfg['special']['label']} "
@@ -375,8 +393,7 @@ else:
 
     with right:
         ready = (len(ss.main_selected) == cfg["main_picks"]) and ((not cfg["special"]) or (len(ss.special_selected) == cfg["special"]["picks"]))
-        gen = st.button("Generate PDF", disabled=not ready)
-        if gen:
+        if st.button("Generate PDF", disabled=not ready):
             if not can_run(ss.runs_log, RUNS_PER_DAY):
                 st.warning("Daily free limit reached. Upgrade to continue today.")
             else:
@@ -401,26 +418,78 @@ else:
     with cols[1]:
         if st.button("Generate Insights Report (Premium)"):
             if str(pass_in).strip() == str(PREMIUM_PASS):
-                if not can_run(ss.runs_log, RUNS_PER_DAY + 9999):  # premium not limited here; adjust if needed
-                    st.warning("Daily limit reached.")
-                else:
-                    seed = random.randint(1, 10_000_000)
-                    params = {"game": ss.game, "mode": "insights", "main": sorted(list(ss.main_selected))}
-                    vcode = verification_code(ss.game, seed, params)
-                    meta = {"vcode": vcode}
-                    tr = compute_trends(ss.game, draws=120, alpha=0.97)
-                    insights_pdf = build_insights_pdf(ss.game, tr, sorted(ss.main_selected), seed, meta)
-                    st.success("Premium unlocked. Download below.")
-                    st.download_button("Download Insights PDF", data=insights_pdf, file_name="smartplayai_insights.pdf", mime="application/pdf")
+                # You can separate premium limits if desired; currently effectively unlimited vs free.
+                seed = random.randint(1, 10_000_000)
+                params = {"game": ss.game, "mode": "insights", "main": sorted(list(ss.main_selected))}
+                vcode = verification_code(ss.game, seed, params)
+                meta = {"vcode": vcode}
+                tr = compute_trends(ss.game, draws=120, alpha=0.97)
+                insights_pdf = build_insights_pdf(ss.game, tr, sorted(ss.main_selected), seed, meta)
+                st.success("Premium unlocked. Download below.")
+                st.download_button("Download Insights PDF", data=insights_pdf, file_name="smartplayai_insights.pdf", mime="application/pdf")
             else:
                 st.error("Invalid passcode.")
 
-    # Status line + footer
-    st.markdown(
-        f"<div style='text-align:center;opacity:.9;margin-top:10px;'>{ss.game}: "
-        f"Main picks ({len(ss.main_selected)}/{cfg['main_picks']})"
-        + (f" | {cfg['special']['label']} ({len(ss.special_selected)}/{cfg['special']['picks']})" if cfg['special'] else "")
-        + "</div>", unsafe_allow_html=True
-    )
+    # ----------------------------- Live Countdown -----------------------------
+    def render_countdown(selected_game: str):
+        if not selected_game:
+            return
+        target = next_draw_datetime(selected_game)
+        # tick every second
+        try:
+            st.autorefresh(interval=1000, key=f"countdown_{selected_game.replace(' ', '_')}")
+        except Exception:
+            pass  # older Streamlit versions
+
+        now_t = datetime.now(TZ) if TZ else datetime.now()
+        remaining = target - now_t
+        secs = int(remaining.total_seconds())
+        if secs <= 0:
+            st.toast("It's draw time! Updating…", icon="⏱️")
+            target = next_draw_datetime(selected_game)
+            now_t = datetime.now(TZ) if TZ else datetime.now()
+            remaining = target - now_t
+            secs = int(remaining.total_seconds())
+
+        days = secs // 86400
+        hrs  = (secs % 86400) // 3600
+        mins = (secs % 3600) // 60
+        s    = secs % 60
+
+        st.markdown(
+            f"""
+            <div class="timer-pill">
+              <span>⏱ Next <b>{selected_game}</b> draw in</span>
+              <span class="timer-seg">{days:02d}d</span>
+              <span class="timer-seg">{hrs:02d}h</span>
+              <span class="timer-seg">{mins:02d}m</span>
+              <span class="timer-seg">{s:02d}s</span>
+              <span class="timer-lab">({next_draw_datetime(selected_game).strftime('%a, %b %d • %I:%M %p')})</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
     st.markdown("---")
-    st.caption(f"Analytics only • No guaranteed outcomes • 18+ • {RESP_HELP} • © SmartPlayAI • {BRAND_URL}")
+    render_countdown(ss.game)
+
+# ----------------------------- Footer -----------------------------
+st.markdown("""
+<hr style="margin-top:30px; margin-bottom:10px; border:1px solid rgba(255,255,255,0.15);">
+<div style="text-align:center; font-size:14px; color:#aaa;">
+  <p>
+    <a href="https://raw.githubusercontent.com/Smartplayai/smartplayai-app/main/privacy_policy.md" target="_blank" style="color:#fff;text-decoration:none;">
+      Privacy Policy
+    </a> | 
+    <a href="https://raw.githubusercontent.com/Smartplayai/smartplayai-app/main/terms_of_service.md" target="_blank" style="color:#fff;text-decoration:none;">
+      Terms of Service
+    </a> | 
+    <a href="https://raw.githubusercontent.com/Smartplayai/smartplayai-app/main/responsible_gaming.md" target="_blank" style="color:#fff;text-decoration:none;">
+      Responsible Gaming
+    </a>
+  </p>
+  <p style="font-size:13px; margin-top:8px;">
+    © 2025 SmartPlayAI • Play responsibly. Must be 18+ • Insights are for entertainment only.
+  </p>
+</div>
+""", unsafe_allow_html=True)
